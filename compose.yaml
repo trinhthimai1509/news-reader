@@ -1,0 +1,41 @@
+services:
+  db:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: news
+      POSTGRES_USER: news
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+    # No published port: PostgreSQL is only reachable from the app container.
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: [CMD-SHELL, 'pg_isready -U news -d news']
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+  app:
+    build: .
+    environment:
+      DATABASE_URL: postgres://news:${POSTGRES_PASSWORD}@db:5432/news?sslmode=disable
+      ADMIN_TOKEN: ${ADMIN_TOKEN:?Set ADMIN_TOKEN in .env}
+      POLL_INTERVAL: ${POLL_INTERVAL:-2m}
+      FULL_TEXT_ENABLED: ${FULL_TEXT_ENABLED:-true}
+      LISTEN_ADDR: ':8080'
+      # Local mode without access code. The app accepts it only if the port
+      # below is published on loopback: PUBLISHED_HOST and the port mapping
+      # come from the same APP_BIND value.
+      LOCAL_NO_AUTH: ${LOCAL_NO_AUTH:-false}
+      PUBLISHED_HOST: ${APP_BIND:-127.0.0.1}
+    ports:
+      - '${APP_BIND:-127.0.0.1}:${APP_PORT:-8080}:8080'
+    depends_on:
+      db:
+        condition: service_healthy
+    init: true
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ['no-new-privileges:true']
+    restart: unless-stopped
+volumes:
+  pgdata:

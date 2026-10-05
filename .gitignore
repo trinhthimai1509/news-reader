@@ -1,0 +1,24 @@
+# Secrets: only .env.example (safe sample values) is committed.
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+# Local data, never committed.
+backups/
+*.dump
+*.sql.gz
+pgdata/
+# Demo videos stay local.
+demo/
+*.mp4
+# Build output, logs, caches, temp files, browser profiles.
+bin/
+*.log
+*.test
+*.out
+tmp/
+.cache/
+prof-*/
+node_modules/
+.DS_Store
