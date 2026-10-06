@@ -2,19 +2,18 @@ package main
 
 import (
 	"context"
-	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"log"
-	"net"
 	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
 	"personal.news/reader/internal/news"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -34,6 +33,7 @@ type Source struct {
 	LastSuccess *time.Time `json:"last_success"`
 	LastError   string     `json:"last_error"`
 	Category    string     `json:"category"`
+	Country     string     `json:"country"` // of the publisher; "" = Chưa xác định
 	ETag        string     `json:"-"`
 	Modified    string     `json:"-"`
 }
@@ -50,6 +50,7 @@ type Article struct {
 	Published  time.Time    `json:"published_at"`
 	Fetched    time.Time    `json:"fetched_at"`
 	Categories []string     `json:"categories"`
+	Country    string       `json:"country"` // of the publisher, not of the article's subject
 	HasVideo   bool         `json:"has_video"`
 	Authors    []string     `json:"authors"`
 	Blocks     []news.Block `json:"blocks,omitempty"`
@@ -59,13 +60,13 @@ type Article struct {
 	Enriched bool `json:"enriched"`
 }
 type App struct {
-	imports importGate
-	kick    chan struct{} // import asks the worker for a round now
-	db      *pgxpool.Pool
-	token   string
-	full    bool
-	limits  limiter
-	local   *localAccess // nil unless LOCAL_NO_AUTH=true passed validation
+	imports  importGate
+	kick     chan struct{} // import asks the worker for a round now
+	db       *pgxpool.Pool
+	full     bool
+	authCfg  authConfig
+	logins   *limiter
+	reportTo string // address of the "Báo lỗi qua email" button (admin only)
 }
 
 const (
@@ -86,46 +87,6 @@ const (
 	siteEnrichLimit = 6
 )
 
-// limiter blocks a client address after repeated wrong tokens. It is sized for
-// a single-user app; entries expire after the window.
-type limiter struct {
-	mu   sync.Mutex
-	hits map[string][]time.Time
-}
-
-const (
-	authWindow   = 5 * time.Minute
-	authFailures = 10
-)
-
-func (l *limiter) blocked(key string, now time.Time) bool {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	return len(l.recent(key, now)) >= authFailures
-}
-func (l *limiter) fail(key string, now time.Time) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	if l.hits == nil || len(l.hits) > 1000 {
-		l.hits = map[string][]time.Time{}
-	}
-	l.hits[key] = append(l.recent(key, now), now)
-}
-func (l *limiter) recent(key string, now time.Time) []time.Time {
-	out := l.hits[key][:0]
-	for _, t := range l.hits[key] {
-		if now.Sub(t) < authWindow {
-			out = append(out, t)
-		}
-	}
-	if len(out) == 0 {
-		delete(l.hits, key)
-		return nil
-	}
-	l.hits[key] = out
-	return out
-}
-
 func send(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(status)
@@ -134,32 +95,6 @@ func send(w http.ResponseWriter, status int, v any) {
 func fail(w http.ResponseWriter, status int, msg string) {
 	send(w, status, map[string]string{"error": msg})
 }
-func (a *App) auth(h http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Cache-Control", "no-store")
-		if a.local.allows(r) {
-			h.ServeHTTP(w, r)
-			return
-		}
-		client, _, e := net.SplitHostPort(r.RemoteAddr)
-		if e != nil {
-			client = r.RemoteAddr
-		}
-		now := time.Now()
-		if a.limits.blocked(client, now) {
-			w.Header().Set("Retry-After", strconv.Itoa(int(authWindow.Seconds())))
-			fail(w, 429, "Nhập sai mã quá nhiều lần, thử lại sau 5 phút")
-			return
-		}
-		v, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
-		if !ok || subtle.ConstantTimeCompare([]byte(v), []byte(a.token)) != 1 {
-			a.limits.fail(client, now)
-			fail(w, 401, "Mã truy cập không đúng")
-			return
-		}
-		h.ServeHTTP(w, r)
-	})
-}
 
 // articleCategories lists the categories of the non-deleted feeds that listed
 // article a, in display order.
@@ -167,7 +102,8 @@ const articleCategories = `ARRAY(SELECT c.slug FROM categories c WHERE EXISTS(SE
  WHERE af.article_id=a.id AND NOT fs.deleted AND fs.category=c.slug) ORDER BY c.position)`
 
 func (a *App) sources(ctx context.Context) ([]Source, error) {
-	rows, e := a.db.Query(ctx, `SELECT id,name,adapter,feed_url,enabled,last_checked,last_success,last_error,category,etag,modified FROM sources WHERE NOT deleted ORDER BY adapter,id`)
+	rows, e := a.db.Query(ctx, `SELECT s.id,s.name,s.adapter,s.feed_url,s.enabled,s.last_checked,s.last_success,s.last_error,s.category,coalesce(p.country,''),s.etag,s.modified
+FROM sources s JOIN publishers p ON p.adapter=s.adapter WHERE NOT s.deleted ORDER BY s.adapter,s.id`)
 	if e != nil {
 		return nil, e
 	}
@@ -175,16 +111,44 @@ func (a *App) sources(ctx context.Context) ([]Source, error) {
 	out := []Source{}
 	for rows.Next() {
 		var s Source
-		if e = rows.Scan(&s.ID, &s.Name, &s.Adapter, &s.FeedURL, &s.Enabled, &s.LastChecked, &s.LastSuccess, &s.LastError, &s.Category, &s.ETag, &s.Modified); e != nil {
+		if e = rows.Scan(&s.ID, &s.Name, &s.Adapter, &s.FeedURL, &s.Enabled, &s.LastChecked, &s.LastSuccess, &s.LastError, &s.Category, &s.Country, &s.ETag, &s.Modified); e != nil {
 			return nil, e
 		}
 		out = append(out, s)
 	}
 	return out, rows.Err()
 }
+
+// PublicSource is what readers see of a source: enough for the filters.
+// Feed URLs, errors and check times are for the administrator only.
+type PublicSource struct {
+	ID      int64  `json:"id"`
+	Name    string `json:"name"`
+	Adapter string `json:"adapter"`
+	Country string `json:"country"`
+}
+
+// routes: the reader API is public and read-only; everything that changes
+// data or shows operational details is under /api/admin/ behind requireAdmin.
+// Any other method on a public path gets 405 from the mux, and unknown
+// /api/admin/ paths answer 401 to guests.
 func (a *App) routes() http.Handler {
-	api := http.NewServeMux()
-	api.HandleFunc("GET /api/sources", func(w http.ResponseWriter, r *http.Request) {
+	mux := http.NewServeMux()
+	public := func(pattern string, h http.HandlerFunc) { mux.HandleFunc("GET "+pattern, h) }
+	admin := func(pattern string, h http.HandlerFunc) { mux.Handle(pattern, a.requireAdmin(h)) }
+	public("/api/sources", func(w http.ResponseWriter, r *http.Request) {
+		s, e := a.sources(r.Context())
+		if e != nil {
+			fail(w, 500, "Không đọc được nguồn")
+			return
+		}
+		out := make([]PublicSource, len(s))
+		for i, x := range s {
+			out[i] = PublicSource{x.ID, x.Name, x.Adapter, x.Country}
+		}
+		send(w, 200, out)
+	})
+	admin("GET /api/admin/sources", func(w http.ResponseWriter, r *http.Request) {
 		s, e := a.sources(r.Context())
 		if e != nil {
 			fail(w, 500, "Không đọc được nguồn")
@@ -192,7 +156,7 @@ func (a *App) routes() http.Handler {
 		}
 		send(w, 200, s)
 	})
-	api.HandleFunc("PATCH /api/sources/{id}", func(w http.ResponseWriter, r *http.Request) {
+	admin("PATCH /api/admin/sources/{id}", func(w http.ResponseWriter, r *http.Request) {
 		id, e := strconv.ParseInt(r.PathValue("id"), 10, 64)
 		// Name, category and enabled can change; the adapter and feed URL cannot.
 		var b struct {
@@ -228,7 +192,7 @@ func (a *App) routes() http.Handler {
 		}
 		send(w, 200, map[string]bool{"ok": true})
 	})
-	api.HandleFunc("DELETE /api/sources/{id}", func(w http.ResponseWriter, r *http.Request) {
+	admin("DELETE /api/admin/sources/{id}", func(w http.ResponseWriter, r *http.Request) {
 		id, e := strconv.ParseInt(r.PathValue("id"), 10, 64)
 		if e != nil {
 			fail(w, 400, "ID không hợp lệ")
@@ -245,7 +209,7 @@ func (a *App) routes() http.Handler {
 		}
 		send(w, 200, map[string]bool{"ok": true})
 	})
-	api.HandleFunc("GET /api/articles", func(w http.ResponseWriter, r *http.Request) {
+	public("/api/articles", func(w http.ResponseWriter, r *http.Request) {
 		var source int64
 		if v := r.URL.Query().Get("source"); v != "" {
 			n, e := strconv.ParseInt(v, 10, 64)
@@ -254,6 +218,11 @@ func (a *App) routes() http.Handler {
 				return
 			}
 			source = n
+		}
+		country := r.URL.Query().Get("country")
+		if !validCountryFilter(country) {
+			fail(w, 400, "Quốc gia không hợp lệ")
+			return
 		}
 		category := r.URL.Query().Get("category")
 		if category != "" && !slugPattern.MatchString(category) {
@@ -284,14 +253,16 @@ func (a *App) routes() http.Handler {
 			return
 		}
 		// The source filter matches every feed that listed the article, not
-		// only the feed that delivered it first.
-		rows, e := a.db.Query(r.Context(), `SELECT a.id,a.source_id,s.name,s.adapter,a.title,a.url,a.summary,a.content_status,a.published_at,a.fetched_at,`+articleCategories+`,a.has_video
-FROM articles a JOIN sources s ON s.id=a.source_id
+		// only the feed that delivered it first. The country is the one of
+		// the publisher (every feed of an article is on the same website).
+		rows, e := a.db.Query(r.Context(), `SELECT a.id,a.source_id,s.name,s.adapter,a.title,a.url,a.summary,a.content_status,a.published_at,a.fetched_at,`+articleCategories+`,coalesce(p.country,''),a.has_video
+FROM articles a JOIN sources s ON s.id=a.source_id JOIN publishers p ON p.adapter=s.adapter
 WHERE NOT s.deleted AND a.id <= $6
  AND ($1=0 OR EXISTS(SELECT 1 FROM article_feeds sf WHERE sf.article_id=a.id AND sf.source_id=$1))
  AND ($2='' OR a.title ILIKE '%'||$2||'%')
  AND ($5='' OR `+fmt.Sprintf(visibleInCategory, "$5")+`)
-ORDER BY a.published_at DESC,a.id DESC LIMIT $3 OFFSET $4`, source, like, pageSize+1, (page-1)*pageSize, category, cursor)
+ AND `+fmt.Sprintf(countryMatches, "$7")+`
+ORDER BY a.published_at DESC,a.id DESC LIMIT $3 OFFSET $4`, source, like, pageSize+1, (page-1)*pageSize, category, cursor, country)
 		if e != nil {
 			fail(w, 500, "Không đọc được tin")
 			return
@@ -300,7 +271,7 @@ ORDER BY a.published_at DESC,a.id DESC LIMIT $3 OFFSET $4`, source, like, pageSi
 		out := []Article{}
 		for rows.Next() {
 			var b Article
-			if rows.Scan(&b.ID, &b.SourceID, &b.Source, &b.Adapter, &b.Title, &b.URL, &b.Summary, &b.Status, &b.Published, &b.Fetched, &b.Categories, &b.HasVideo) != nil {
+			if rows.Scan(&b.ID, &b.SourceID, &b.Source, &b.Adapter, &b.Title, &b.URL, &b.Summary, &b.Status, &b.Published, &b.Fetched, &b.Categories, &b.Country, &b.HasVideo) != nil {
 				fail(w, 500, "Không đọc được tin")
 				return
 			}
@@ -316,7 +287,7 @@ ORDER BY a.published_at DESC,a.id DESC LIMIT $3 OFFSET $4`, source, like, pageSi
 		}
 		send(w, 200, map[string]any{"items": out, "page": page, "has_more": more, "cursor": cursor})
 	})
-	api.HandleFunc("GET /api/articles/{id}", func(w http.ResponseWriter, r *http.Request) {
+	public("/api/articles/{id}", func(w http.ResponseWriter, r *http.Request) {
 		id, e := strconv.ParseInt(r.PathValue("id"), 10, 64)
 		if e != nil {
 			fail(w, 400, "ID không hợp lệ")
@@ -324,7 +295,8 @@ ORDER BY a.published_at DESC,a.id DESC LIMIT $3 OFFSET $4`, source, like, pageSi
 		}
 		var b Article
 		var body, blocks, lead []byte
-		e = a.db.QueryRow(r.Context(), `SELECT a.id,a.source_id,s.name,s.adapter,a.title,a.url,a.summary,a.paragraphs,a.content_status,a.published_at,a.fetched_at,`+articleCategories+`,a.authors,a.blocks,a.lead_image,a.extract_version>=$2,a.has_video FROM articles a JOIN sources s ON s.id=a.source_id WHERE a.id=$1 AND NOT s.deleted`, id, news.ExtractVersion).Scan(&b.ID, &b.SourceID, &b.Source, &b.Adapter, &b.Title, &b.URL, &b.Summary, &body, &b.Status, &b.Published, &b.Fetched, &b.Categories, &b.Authors, &blocks, &lead, &b.Enriched, &b.HasVideo)
+		e = a.db.QueryRow(r.Context(), `SELECT a.id,a.source_id,s.name,s.adapter,a.title,a.url,a.summary,a.paragraphs,a.content_status,a.published_at,a.fetched_at,`+articleCategories+`,coalesce(p.country,''),a.authors,a.blocks,a.lead_image,a.extract_version>=$2,a.has_video
+FROM articles a JOIN sources s ON s.id=a.source_id JOIN publishers p ON p.adapter=s.adapter WHERE a.id=$1 AND NOT s.deleted`, id, news.ExtractVersion).Scan(&b.ID, &b.SourceID, &b.Source, &b.Adapter, &b.Title, &b.URL, &b.Summary, &body, &b.Status, &b.Published, &b.Fetched, &b.Categories, &b.Country, &b.Authors, &blocks, &lead, &b.Enriched, &b.HasVideo)
 		if errors.Is(e, pgx.ErrNoRows) {
 			fail(w, 404, "Không tìm thấy bài")
 			return
@@ -351,9 +323,12 @@ ORDER BY a.published_at DESC,a.id DESC LIMIT $3 OFFSET $4`, source, like, pageSi
 		}
 		send(w, 200, b)
 	})
-	api.HandleFunc("GET /api/categories", a.handleCategories)
-	api.HandleFunc("POST /api/sources/import", a.handleImport)
-	api.HandleFunc("GET /api/status", func(w http.ResponseWriter, r *http.Request) {
+	public("/api/categories", a.handleCategories)
+	public("/api/countries", a.handleCountries)
+	admin("POST /api/admin/sources/import", a.handleImport)
+	admin("GET /api/admin/publishers", a.handlePublishers)
+	admin("PATCH /api/admin/publishers/{adapter}", a.handleSetPublisherCountry)
+	admin("GET /api/admin/status", func(w http.ResponseWriter, r *http.Request) {
 		var done, pending, failed int64
 		e := a.db.QueryRow(r.Context(), `SELECT count(*) FILTER (WHERE extract_version>=$1), count(*) FILTER (WHERE extract_version<$1 AND enrich_attempts<3), count(*) FILTER (WHERE extract_version<$1 AND enrich_attempts>=3)
 FROM articles a JOIN sources s ON s.id=a.source_id WHERE NOT s.deleted AND `+enrichable, news.ExtractVersion).Scan(&done, &pending, &failed)
@@ -363,14 +338,11 @@ FROM articles a JOIN sources s ON s.id=a.source_id WHERE NOT s.deleted AND `+enr
 		}
 		send(w, 200, map[string]any{"enrich": map[string]int64{"done": done, "pending": pending, "failed": failed}})
 	})
-	mux := http.NewServeMux()
-	mux.Handle("/api/", a.auth(api))
-	// Public: tells the page whether this request needs the access code.
-	// It never returns the token.
-	mux.HandleFunc("GET /api/session", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Cache-Control", "no-store")
-		send(w, 200, map[string]bool{"auth_required": !a.local.allows(r)})
-	})
+	admin("POST /api/admin/logout", a.handleLogout)
+	admin("/api/admin/", func(w http.ResponseWriter, r *http.Request) { fail(w, 404, "Không tìm thấy") })
+	public("/api/admin/session", a.handleSession)
+	mux.HandleFunc("POST /api/admin/login", a.handleLogin)
+	mux.HandleFunc("/api/", func(w http.ResponseWriter, r *http.Request) { fail(w, 404, "Không tìm thấy") })
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
 		ctx, c := context.WithTimeout(r.Context(), 2*time.Second)
 		defer c()
@@ -390,6 +362,9 @@ FROM articles a JOIN sources s ON s.id=a.source_id WHERE NOT s.deleted AND `+enr
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("Referrer-Policy", "no-referrer")
+		if strings.HasPrefix(r.URL.Path, "/api/") {
+			w.Header().Set("Cache-Control", "no-store")
+		}
 		w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' https://ichef.bbci.co.uk https://*.vnecdn.net https://cdn2.tuoitre.vn; media-src 'self' https://cdn2.tuoitre.vn; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'")
 		mux.ServeHTTP(w, r)
 	})
@@ -798,11 +773,63 @@ func migrate(ctx context.Context, db *pgxpool.Pool, dir string) error {
 	}
 	return tx.Commit(ctx)
 }
-func main() {
-	token := os.Getenv("ADMIN_TOKEN")
-	if len(token) < 32 {
-		log.Fatal("ADMIN_TOKEN must contain at least 32 characters")
+
+// envDuration reads a duration setting within [lo, hi].
+func envDuration(name string, def, lo, hi time.Duration) time.Duration {
+	v := os.Getenv(name)
+	if v == "" {
+		return def
 	}
+	d, e := time.ParseDuration(v)
+	if e != nil || d < lo || d > hi {
+		log.Fatalf("%s must be a duration between %s and %s", name, lo, hi)
+	}
+	return d
+}
+
+// loadAuthConfig reads the session settings. The removed access-code modes
+// (ADMIN_TOKEN, LOCAL_NO_AUTH) are ignored: they grant nothing any more.
+func loadAuthConfig() (authConfig, string) {
+	c := defaultAuthConfig()
+	c.ttl = envDuration("ADMIN_SESSION_TTL", c.ttl, time.Minute, 30*24*time.Hour)
+	c.idle = envDuration("ADMIN_SESSION_IDLE", c.idle, time.Minute, c.ttl)
+	switch os.Getenv("COOKIE_SECURE") {
+	case "", "false":
+		log.Print("COOKIE_SECURE=false: the admin cookie is sent over plain HTTP. Set COOKIE_SECURE=true when the app is served over HTTPS.")
+	case "true":
+		c.secure = true
+	default:
+		log.Fatal("COOKIE_SECURE must be true or false")
+	}
+	if os.Getenv("ADMIN_TOKEN") != "" {
+		log.Print("ADMIN_TOKEN is no longer used (access-code login was removed); it can be deleted from .env")
+	}
+	if os.Getenv("LOCAL_NO_AUTH") != "" {
+		log.Print("LOCAL_NO_AUTH is no longer used: reading is public and source management always needs the admin login")
+	}
+	report := os.Getenv("REPORT_EMAIL")
+	if report == "" {
+		report = defaultReportEmail
+	}
+	if !emailPattern.MatchString(report) {
+		log.Fatal("REPORT_EMAIL is not a valid address")
+	}
+	return c, report
+}
+
+const defaultReportEmail = "trinhthimai1509@gmail.com"
+
+var emailPattern = regexp.MustCompile(`^[^@\s<>"]+@[^@\s<>"]+\.[^@\s<>"]+$`)
+
+func main() {
+	if len(os.Args) > 1 && os.Args[1] == "admin" {
+		if e := adminCLI(os.Args[2:], os.Stdin, os.Stdout); e != nil {
+			fmt.Fprintln(os.Stderr, "Lỗi:", e)
+			os.Exit(1)
+		}
+		return
+	}
+	authCfg, reportTo := loadAuthConfig()
 	interval := 2 * time.Minute
 	if v := os.Getenv("POLL_INTERVAL"); v != "" {
 		d, e := time.ParseDuration(v)
@@ -837,17 +864,23 @@ func main() {
 	if rep.Groups > 0 {
 		log.Printf("merge duplicates: %d groups found, %d merged, %d rows removed, %d kept apart %v", rep.Groups, rep.Merged, rep.Removed, len(rep.Skipped), rep.Skipped)
 	}
-	app := &App{db: db, token: token, full: os.Getenv("FULL_TEXT_ENABLED") != "false", kick: make(chan struct{}, 1)}
-	switch os.Getenv("LOCAL_NO_AUTH") {
-	case "", "false":
-	case "true":
-		if app.local, e = newLocalAccess(addr, os.Getenv("PUBLISHED_HOST"), "/proc/net/route"); e != nil {
-			log.Fatal(e)
-		}
-		log.Printf("LOCAL_NO_AUTH: requests from %s with a localhost Host header need no access code. Do not put this behind a reverse proxy.", app.local)
-	default:
-		log.Fatal("LOCAL_NO_AUTH must be true or false")
+	app := &App{db: db, full: os.Getenv("FULL_TEXT_ENABLED") != "false", kick: make(chan struct{}, 1), authCfg: authCfg, logins: newLoginLimiter(), reportTo: reportTo}
+	var admins int
+	if db.QueryRow(ctx, `SELECT count(*) FROM admin_users`).Scan(&admins) == nil && admins == 0 {
+		log.Print("No admin account yet: reading works, source management is locked. Create it with `server admin create <username>` (see README).")
 	}
+	go func() {
+		t := time.NewTicker(time.Hour)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				app.cleanSessions(ctx)
+			}
+		}
+	}()
 	done := make(chan struct{})
 	go func() {
 		defer close(done)

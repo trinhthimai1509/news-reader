@@ -43,6 +43,8 @@ test('background refresh, all view and filtered lists do not mark seen', async (
   await loadAndMark(s, ok, '', { userAction: true });
   await loadAndMark(s, ok, 'the-gioi', { userAction: true, query: 'bão' });
   await loadAndMark(s, ok, 'the-gioi', { userAction: true, source: '3' });
+  await loadAndMark(s, ok, 'the-gioi', { userAction: true, country: 'GB' });
+  await loadAndMark(s, ok, 'the-gioi', { userAction: true, country: 'unknown' });
   assert.deepStrictEqual(s.snapshot(), { 'thoi-su': 500, 'the-gioi': 500, khac: 500 });
   await loadAndMark(s, ok, 'the-gioi', { userAction: true });
   assert.strictEqual(s.cursor('the-gioi'), 900);
