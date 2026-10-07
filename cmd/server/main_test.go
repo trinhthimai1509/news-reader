@@ -4,9 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"net/http"
 	"net/http/httptest"
-	"net/netip"
 	"os"
 	"path/filepath"
 	"strings"
@@ -18,74 +16,10 @@ import (
 	"personal.news/reader/internal/news"
 )
 
-func TestPrivateAPIRequiresToken(t *testing.T) {
-	app := &App{token: strings.Repeat("a", 32)}
-	for _, path := range []string{"/api/articles", "/api/articles/1", "/api/sources"} {
-		r := httptest.NewRequest("GET", path, nil)
-		w := httptest.NewRecorder()
-		app.routes().ServeHTTP(w, r)
-		if w.Code != http.StatusUnauthorized {
-			t.Fatalf("%s: %d", path, w.Code)
-		}
-		if w.Header().Get("Cache-Control") != "no-store" {
-			t.Fatal("private API must not be cached")
-		}
-	}
-}
-func TestTokenWithoutBearerSchemeRejected(t *testing.T) {
-	app := &App{token: strings.Repeat("a", 32)}
-	r := httptest.NewRequest("GET", "/api/sources", nil)
-	r.Header.Set("Authorization", app.token)
-	w := httptest.NewRecorder()
-	app.routes().ServeHTTP(w, r)
-	if w.Code != http.StatusUnauthorized {
-		t.Fatalf("raw token without Bearer accepted: %d", w.Code)
-	}
-}
-func TestRepeatedWrongTokensAreThrottled(t *testing.T) {
-	app := &App{token: strings.Repeat("a", 32)}
-	h := app.routes()
-	code := 0
-	for i := 0; i <= authFailures; i++ {
-		r := httptest.NewRequest("GET", "/api/sources", nil)
-		r.Header.Set("Authorization", "Bearer wrong")
-		w := httptest.NewRecorder()
-		h.ServeHTTP(w, r)
-		code = w.Code
-	}
-	if code != http.StatusTooManyRequests {
-		t.Fatalf("expected 429 after %d failures, got %d", authFailures, code)
-	}
-}
-
-// The only add flow is the import endpoint: unsafe or unsupported URLs are
-// refused before any database access or request; the old manual POST is gone.
-func TestSourceURLValidatedBeforeDatabase(t *testing.T) {
-	app := &App{token: strings.Repeat("a", 32)}
-	do := func(method, path, body string) int {
-		r := httptest.NewRequest(method, path, strings.NewReader(body))
-		r.Header.Set("Authorization", "Bearer "+app.token)
-		w := httptest.NewRecorder()
-		app.routes().ServeHTTP(w, r)
-		return w.Code
-	}
-	for _, u := range []string{"https://127.0.0.1/news/rss.xml", "http://feeds.bbci.co.uk/news/rss.xml", "https://example.com/rss/a.rss", "https://vnexpress.net:8443/rss/a.rss", ""} {
-		if c := do("POST", "/api/sources/import", `{"url":"`+u+`"}`); c != 422 {
-			t.Errorf("%q: %d", u, c)
-		}
-	}
-	if c := do("POST", "/api/sources/import", `not json`); c != 400 {
-		t.Errorf("not json: %d", c)
-	}
-	if c := do("POST", "/api/sources", `{"name":"x","adapter":"bbc","feed_url":"https://feeds.bbci.co.uk/news/rss.xml"}`); c != 405 {
-		t.Errorf("manual POST still served: %d", c)
-	}
-}
 func TestArticleQueryValidatedBeforeDatabase(t *testing.T) {
-	app := &App{token: strings.Repeat("a", 32)}
-	for _, q := range []string{"source=abc", "source=1%20OR%201=1", "page=-1", "page=x", "q=" + strings.Repeat("a", 201)} {
+	app := newTestApp(nil)
+	for _, q := range []string{"source=abc", "source=1%20OR%201=1", "page=-1", "page=x", "q=" + strings.Repeat("a", 201), "country=vn", "country=VNM", "country=V1", "country=unknown2", "country=VN%27"} {
 		r := httptest.NewRequest("GET", "/api/articles?"+q, nil)
-		r.Header.Set("Authorization", "Bearer "+app.token)
 		w := httptest.NewRecorder()
 		app.routes().ServeHTTP(w, r)
 		if w.Code != 400 {
@@ -94,116 +28,6 @@ func TestArticleQueryValidatedBeforeDatabase(t *testing.T) {
 	}
 }
 
-func TestLocalAccessConfig(t *testing.T) {
-	route := filepath.Join(t.TempDir(), "route")
-	// Default route via 172.18.0.1 (little-endian hex as in /proc/net/route).
-	os.WriteFile(route, []byte("Iface\tDestination\tGateway \tFlags\neth0\t00000000\t010012AC\t0003\neth0\t000012AC\t00000000\t0001\n"), 0o600)
-	for _, c := range []struct {
-		listen, published string
-		ok                bool
-	}{
-		{"127.0.0.1:8080", "", true},
-		{"[::1]:8080", "", true},
-		{"localhost:8080", "", true},
-		{":8080", "127.0.0.1", true},
-		{":8080", "", false},
-		{":8080", "0.0.0.0", false},
-		{"0.0.0.0:8080", "192.168.1.5", false},
-		{"192.168.1.5:8080", "", false},
-	} {
-		l, e := newLocalAccess(c.listen, c.published, route)
-		if (e == nil) != c.ok {
-			t.Errorf("%+v: %v", c, e)
-		}
-		if e == nil && c.listen == ":8080" && !strings.Contains(l.String(), "172.18.0.1/32") {
-			t.Errorf("gateway not trusted: %s", l)
-		}
-	}
-	if _, e := newLocalAccess(":8080", "127.0.0.1", filepath.Join(t.TempDir(), "missing")); e == nil {
-		t.Error("container mode without a known gateway must refuse")
-	}
-}
-
-func localReq(method, peer, host string, hdr map[string]string) *http.Request {
-	r := httptest.NewRequest(method, "/api/articles?page=x", nil)
-	r.RemoteAddr, r.Host = peer, host
-	for k, v := range hdr {
-		r.Header.Set(k, v)
-	}
-	return r
-}
-func TestLocalAccessDecision(t *testing.T) {
-	l := &localAccess{peers: append(append([]netip.Prefix{}, loopbackPeers...), netip.MustParsePrefix("172.18.0.1/32"))}
-	json := map[string]string{"Content-Type": "application/json", "Origin": "http://127.0.0.1:8080", "Sec-Fetch-Site": "same-origin"}
-	for _, c := range []struct {
-		name string
-		r    *http.Request
-		want bool
-	}{
-		{"loopback", localReq("GET", "127.0.0.1:5000", "127.0.0.1:8080", nil), true},
-		{"ipv6 loopback", localReq("GET", "[::1]:5000", "localhost:8080", nil), true},
-		{"docker gateway", localReq("GET", "172.18.0.1:5000", "localhost:8080", nil), true},
-		{"other container", localReq("GET", "172.18.0.3:5000", "localhost:8080", nil), false},
-		{"lan peer", localReq("GET", "192.168.1.20:5000", "127.0.0.1:8080", nil), false},
-		{"lan peer spoofing XFF", localReq("GET", "192.168.1.20:5000", "127.0.0.1:8080", map[string]string{"X-Forwarded-For": "127.0.0.1"}), false},
-		{"proxied via loopback", localReq("GET", "127.0.0.1:5000", "127.0.0.1:8080", map[string]string{"X-Forwarded-For": "203.0.113.9"}), false},
-		{"forwarded header", localReq("GET", "127.0.0.1:5000", "127.0.0.1:8080", map[string]string{"Forwarded": "for=203.0.113.9"}), false},
-		{"dns rebinding host", localReq("GET", "127.0.0.1:5000", "evil.example:8080", nil), false},
-		{"same-origin json post", localReq("POST", "127.0.0.1:5000", "127.0.0.1:8080", json), true},
-		{"cross-site post", localReq("POST", "127.0.0.1:5000", "127.0.0.1:8080", map[string]string{"Content-Type": "application/json", "Origin": "https://evil.example"}), false},
-		{"cross-site fetch metadata", localReq("DELETE", "127.0.0.1:5000", "127.0.0.1:8080", map[string]string{"Sec-Fetch-Site": "cross-site"}), false},
-		{"text/plain post (no preflight)", localReq("POST", "127.0.0.1:5000", "127.0.0.1:8080", map[string]string{"Content-Type": "text/plain"}), false},
-	} {
-		if got := l.allows(c.r); got != c.want {
-			t.Errorf("%s: got %v want %v", c.name, got, c.want)
-		}
-	}
-	var off *localAccess
-	if off.allows(localReq("GET", "127.0.0.1:5000", "127.0.0.1:8080", nil)) {
-		t.Error("disabled local mode must not allow")
-	}
-}
-func TestAuthModes(t *testing.T) {
-	token := strings.Repeat("a", 32)
-	normal := &App{token: token}
-	local := &App{token: token, local: &localAccess{peers: loopbackPeers}}
-	do := func(app *App, path, peer, auth string) (int, string) {
-		r := httptest.NewRequest("GET", path, nil)
-		r.RemoteAddr, r.Host = peer, "127.0.0.1:8080"
-		if auth != "" {
-			r.Header.Set("Authorization", auth)
-		}
-		w := httptest.NewRecorder()
-		app.routes().ServeHTTP(w, r)
-		return w.Code, w.Body.String()
-	}
-	// page=x fails validation (400) only after authentication passed.
-	if c, _ := do(normal, "/api/articles?page=x", "127.0.0.1:1", ""); c != 401 {
-		t.Errorf("normal mode without token: %d", c)
-	}
-	if c, _ := do(normal, "/api/articles?page=x", "127.0.0.1:1", "Bearer "+token); c != 400 {
-		t.Errorf("normal mode with token: %d", c)
-	}
-	if c, _ := do(local, "/api/articles?page=x", "127.0.0.1:1", ""); c != 400 {
-		t.Errorf("local mode from loopback: %d", c)
-	}
-	if c, _ := do(local, "/api/articles?page=x", "192.168.1.20:1", ""); c != 401 {
-		t.Errorf("local mode from LAN must still need the token: %d", c)
-	}
-	if c, _ := do(local, "/api/articles?page=x", "192.168.1.20:1", "Bearer "+token); c != 400 {
-		t.Errorf("token still works in local mode: %d", c)
-	}
-	for _, c := range []struct {
-		app  *App
-		peer string
-		want string
-	}{{normal, "127.0.0.1:1", `{"auth_required":true}`}, {local, "127.0.0.1:1", `{"auth_required":false}`}, {local, "192.168.1.20:1", `{"auth_required":true}`}} {
-		_, body := do(c.app, "/api/session", c.peer, "")
-		if strings.TrimSpace(body) != c.want || strings.Contains(body, token) {
-			t.Errorf("session %s: %s", c.peer, body)
-		}
-	}
-}
 func TestParseSeen(t *testing.T) {
 	if s, c, ok := parseSeen("thoi-su:10,the-gioi:0"); !ok || len(s) != 2 || c[0] != 10 {
 		t.Fatal(s, c, ok)
@@ -239,7 +63,7 @@ func migratedApp(t *testing.T) (*App, context.Context) {
 	if e := migrate(ctx, db, "../../migrations"); e != nil {
 		t.Fatal(e)
 	}
-	return &App{db: db, token: strings.Repeat("a", 32)}, ctx
+	return newTestApp(db), ctx
 }
 func addSource(t *testing.T, a *App, name, url, category string) Source {
 	s := Source{Name: name, Adapter: "bbc", FeedURL: url, Category: category}
@@ -253,7 +77,6 @@ func item(path, title string, published time.Time) news.Item {
 }
 func get(t *testing.T, a *App, path string, v any) int {
 	r := httptest.NewRequest("GET", path, nil)
-	r.Header.Set("Authorization", "Bearer "+a.token)
 	w := httptest.NewRecorder()
 	a.routes().ServeHTTP(w, r)
 	if v != nil && w.Code == 200 {
@@ -304,7 +127,7 @@ func TestMigrationsConcurrentAndRepeatable(t *testing.T) {
 	}
 	var n, cats int
 	db.QueryRow(ctx, `SELECT count(*), (SELECT count(*) FROM categories) FROM schema_migrations`).Scan(&n, &cats)
-	if n != 11 || cats != 9 {
+	if n != 13 || cats != 9 {
 		t.Fatalf("migrations=%d categories=%d", n, cats)
 	}
 }
@@ -529,7 +352,7 @@ func TestStaticFilesRevalidate(t *testing.T) {
 	wd, _ := os.Getwd()
 	os.Chdir("../..")
 	defer os.Chdir(wd)
-	app := &App{token: strings.Repeat("a", 32)}
+	app := newTestApp(nil)
 	for _, p := range []string{"/", "/app.js", "/seen.js"} {
 		w := httptest.NewRecorder()
 		app.routes().ServeHTTP(w, httptest.NewRequest("GET", p, nil))
@@ -562,7 +385,7 @@ func TestEnrichmentKeepsContentOnFailure(t *testing.T) {
 	a.db.QueryRow(ctx, `INSERT INTO articles(source_id,url,title,published_at,content_status,paragraphs) VALUES($1,'https://www.bbc.co.uk/news/articles/e','E',now(),'full','["Good text"]') RETURNING id`, s.ID).Scan(&id)
 	status := func() map[string]int64 {
 		var st struct{ Enrich map[string]int64 }
-		get(t, a, "/api/status", &st)
+		adminGet(t, a, "/api/admin/status", &st)
 		return st.Enrich
 	}
 	if st := status(); st["pending"] != 1 || st["done"] != 0 {
@@ -620,9 +443,9 @@ func TestFailedFetchKeepsFeedImage(t *testing.T) {
 }
 
 func TestCSPAllowsOnlyImageCDNs(t *testing.T) {
-	app := &App{token: strings.Repeat("a", 32)}
+	app := newTestApp(nil)
 	w := httptest.NewRecorder()
-	app.routes().ServeHTTP(w, httptest.NewRequest("GET", "/api/session", nil))
+	app.routes().ServeHTTP(w, httptest.NewRequest("GET", "/api/nope", nil))
 	csp := w.Header().Get("Content-Security-Policy")
 	if !strings.Contains(csp, "img-src 'self' https://ichef.bbci.co.uk https://*.vnecdn.net https://cdn2.tuoitre.vn; media-src 'self' https://cdn2.tuoitre.vn;") || strings.Contains(csp, "img-src *") || strings.Contains(csp, "https: ") || strings.Contains(csp, "data:") {
 		t.Fatal(csp)
@@ -754,7 +577,7 @@ func TestSourceIconsServedLocally(t *testing.T) {
 	wd, _ := os.Getwd()
 	os.Chdir("../..")
 	defer os.Chdir(wd)
-	app := &App{token: strings.Repeat("a", 32)}
+	app := newTestApp(nil)
 	for _, p := range []string{"/icons/vnexpress.png", "/icons/bbc.png"} {
 		w := httptest.NewRecorder()
 		app.routes().ServeHTTP(w, httptest.NewRequest("GET", p, nil))
@@ -854,7 +677,7 @@ func TestVideoBackfill(t *testing.T) {
 	a.db.QueryRow(ctx, `INSERT INTO articles(source_id,url,title,summary,published_at,content_status,paragraphs,extract_version) VALUES($1,'https://www.bbc.co.uk/news/articles/f','F','S',now(),'full','["Văn bản cũ tốt"]',3) RETURNING id`, s.ID).Scan(&full)
 	a.db.QueryRow(ctx, `INSERT INTO articles(source_id,url,title,summary,published_at,content_status,attempts,extract_version) VALUES($1,'https://www.bbc.co.uk/news/videos/v','V','Tóm tắt RSS',now(),'unavailable',3,3) RETURNING id`, s.ID).Scan(&summary)
 	var st struct{ Enrich map[string]int64 }
-	get(t, a, "/api/status", &st)
+	adminGet(t, a, "/api/admin/status", &st)
 	if st.Enrich["pending"] != 2 {
 		t.Fatalf("both rows are due for the video backfill: %v", st.Enrich)
 	}
@@ -879,7 +702,7 @@ func TestVideoBackfill(t *testing.T) {
 	if status != "unavailable" || sum != "Tóm tắt RSS" || !hv || version != news.ExtractVersion || !strings.Contains(blocks, `"type": "video"`) || strings.Contains(blocks, "Mô tả ngắn") {
 		t.Fatalf("summary row: %s %s %s %v v%d", status, sum, blocks, hv, version)
 	}
-	get(t, a, "/api/status", &st)
+	adminGet(t, a, "/api/admin/status", &st)
 	if st.Enrich["pending"] != 1 || st.Enrich["done"] != 1 {
 		t.Fatalf("status: %v", st.Enrich)
 	}
@@ -893,11 +716,7 @@ func TestVideoBackfill(t *testing.T) {
 
 func postImport(t *testing.T, a *App, u string) (int, importResult) {
 	b, _ := json.Marshal(map[string]string{"url": u})
-	r := httptest.NewRequest("POST", "/api/sources/import", strings.NewReader(string(b)))
-	r.Header.Set("Authorization", "Bearer "+a.token)
-	r.Header.Set("Content-Type", "application/json")
-	w := httptest.NewRecorder()
-	a.routes().ServeHTTP(w, r)
+	w := adminFor(t, a).do("POST", "/api/admin/sources/import", string(b))
 	var res importResult
 	json.Unmarshal(w.Body.Bytes(), &res)
 	return w.Code, res
@@ -1027,12 +846,13 @@ func TestImportConcurrentNoDuplicates(t *testing.T) {
 }
 
 func TestImportRequiresAuthAndRateLimit(t *testing.T) {
-	a := &App{token: strings.Repeat("a", 32)}
-	r := httptest.NewRequest("POST", "/api/sources/import", strings.NewReader(`{"url":"https://vnexpress.net/"}`))
+	a := newTestApp(nil)
+	r := httptest.NewRequest("POST", "/api/admin/sources/import", strings.NewReader(`{"url":"https://vnexpress.net/"}`))
+	r.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 	a.routes().ServeHTTP(w, r)
 	if w.Code != 401 {
-		t.Fatalf("no token: %d", w.Code)
+		t.Fatalf("guest import: %d", w.Code)
 	}
 	now := time.Now()
 	for i := 0; i < importPerMin; i++ {
@@ -1076,11 +896,7 @@ func TestEditSourceNameAndCategory(t *testing.T) {
 	a, ctx := migratedApp(t)
 	s := addSource(t, a, "BBC thử", "https://feeds.bbci.co.uk/news/t-x.xml", "khac")
 	patch := func(body string) int {
-		r := httptest.NewRequest("PATCH", fmt.Sprintf("/api/sources/%d", s.ID), strings.NewReader(body))
-		r.Header.Set("Authorization", "Bearer "+a.token)
-		w := httptest.NewRecorder()
-		a.routes().ServeHTTP(w, r)
-		return w.Code
+		return adminFor(t, a).do("PATCH", fmt.Sprintf("/api/admin/sources/%d", s.ID), body).Code
 	}
 	if c := patch(`{"name":"  Khoa học BBC  ","category":"cong-nghe","adapter":"vnexpress","feed_url":"https://vnexpress.net/rss/x.rss"}`); c != 200 {
 		t.Fatal(c)

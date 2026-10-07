@@ -610,3 +610,57 @@ Lúc 09:50 UTC, khoảng 6 phút sau khi bật:
 - **Nội dung:** bản tin 3 nguồn; chấm đỏ; lọc chuyên mục; tìm theo tiêu đề; đọc toàn văn có tác giả/ảnh/chú thích, nguồn và link gốc; phát video MP4 Tuổi Trẻ; fallback video BBC; quản lý nguồn; thêm nguồn bằng URL (nguồn đã có, nguồn chưa hỗ trợ kèm nút báo lỗi).
   - Không thêm hay sửa nguồn nào trong lúc quay.
 - Thư mục `demo/` đã được loại khỏi image Docker và git.
+
+---
+
+# Lượt 9 — lọc theo quốc gia của nguồn báo; đọc công khai, quản trị một tài khoản (2026-10-06)
+
+## 1. Quốc gia của nguồn báo
+
+- **Định nghĩa:** quốc gia của tòa soạn/website đăng bài, không phải quốc gia được nhắc trong bài. Không dịch, không phân loại bằng AI, không suy từ tên miền/tiêu đề. Quốc gia và ngôn ngữ là hai thứ riêng (BBC tiếng Anh → Vương quốc Anh; nếu sau này có BBC Tiếng Việt thì vẫn là Vương quốc Anh).
+- **Mô hình:** migration `012_countries.sql`:
+  - `countries` (mã ISO 3166-1 alpha-2, tên tiếng Việt, thứ tự; 66 nước gồm Thái Lan, Trung Quốc). Thêm nước không tạo nguồn hay bài nào.
+  - `publishers` (một dòng/website, khoá = adapter đang có: `vnexpress`, `bbc`, `tuoitre`), cột `country` NULL = "Chưa xác định". Gán sẵn: VnExpress, Tuổi Trẻ → VN; BBC → GB.
+  - FK `sources.adapter → publishers.adapter`: mọi feed thuộc một website, nên mọi feed của cùng website luôn cùng quốc gia (không có quốc gia riêng từng feed).
+  - Chỉ thêm, idempotent (`IF NOT EXISTS`, `ON CONFLICT DO NOTHING`, kiểm tra constraint trước khi thêm); chạy lại không ghi đè lựa chọn của quản trị viên.
+- **API:** `GET /api/articles?country=VN|GB|…|unknown` (kết hợp `category`, `source`, `q`, `page`); bài và nguồn trả thêm `country`. `GET /api/countries` (công khai): danh sách nước, `in_use`, `unknown_in_use`. Quản trị: `GET /api/admin/publishers`, `PATCH /api/admin/publishers/{adapter}` với `{"country":"TH"}` hoặc `{"country":null}`. Sửa feed (`PATCH /api/admin/sources/{id}`) không nhận quốc gia.
+- **Giao diện:** bộ lọc "Quốc gia nguồn" (chỉ nước đang có nguồn, thêm "Chưa xác định" nếu có website chưa gán); danh sách nguồn thu theo quốc gia, nguồn đang chọn bị bỏ nếu không thuộc quốc gia mới; đổi bộ lọc về trang 1. Màn hình đọc bài: "Nguồn: VnExpress · Việt Nam · …". Quản trị: khung "Quốc gia của website" (một ô chọn/website, ghi rõ áp dụng cho mọi feed), thẻ nguồn hiện "Quốc gia: … (theo website)".
+- **Đã xem / chấm đỏ:** số bài mới của chuyên mục không phụ thuộc bộ lọc quốc gia. Mở chuyên mục khi đang lọc quốc gia (cũng như nguồn/từ khoá) **không** đánh dấu đã xem (`seen.js`, `markSeen` thêm điều kiện `country`). Chuyên mục, chấm đỏ giữ nguyên.
+
+## 2. Đọc công khai, quản trị một tài khoản
+
+- **Công khai (GET, không cần đăng nhập):** `/api/articles`, `/api/articles/{id}`, `/api/categories`, `/api/countries`, `/api/sources` (chỉ `id,name,adapter,country`), `/api/admin/session` (khách chỉ nhận `{"authenticated":false}`), `/healthz`. Phương thức khác trên các đường này → 404/405.
+- **Quản trị (`/api/admin/*`, cần phiên):** `GET sources` (đủ chi tiết), `PATCH/DELETE sources/{id}`, `POST sources/import`, `GET status`, `GET publishers`, `PATCH publishers/{adapter}`, `POST logout`. Đường lạ dưới `/api/admin/` trả 401 cho khách. Các đường cũ (`PATCH/DELETE /api/sources/{id}`, `POST /api/sources/import`, `GET /api/status`, `GET /api/session`) đã gỡ.
+- **Gỡ bỏ:** Bearer `ADMIN_TOKEN` (cùng giới hạn sai mã cũ), chế độ `LOCAL_NO_AUTH` (`local.go`, `PUBLISHED_HOST`), token trong sessionStorage. Nếu `.env` còn hai biến này, app bỏ qua và ghi log nhắc; không còn đường ghi nào không qua phiên quản trị.
+- **Phiên** (`cmd/server/auth.go`, migration `013_admin_auth.sql`):
+  - Mật khẩu: argon2id (m=64 MiB, t=3, p=2, salt 16 byte), PHC string; tối đa 2 phép băm song song; tên sai vẫn băm với hash giả (thời gian trả lời như nhau).
+  - Đăng nhập tạo token ngẫu nhiên 256 bit mới (xoá phiên cũ của trình duyệt đó). DB chỉ lưu SHA-256 của token + CSRF token. Cookie `nr_admin` (`__Host-nr_admin` khi `COOKIE_SECURE=true`): HttpOnly, SameSite=Strict, Path=/, Max-Age = TTL, Secure theo cấu hình.
+  - Hết hạn: tuyệt đối `ADMIN_SESSION_TTL` (12h), không hoạt động `ADMIN_SESSION_IDLE` (2h); dọn phiên hết hạn mỗi giờ và khi đăng nhập. Đăng xuất xoá dòng phiên. `reset-password` xoá mọi phiên.
+  - CSRF cho mọi request ghi: header `X-CSRF-Token` khớp phiên (so sánh hằng thời gian), `Origin` (nếu có) trùng Host, `Sec-Fetch-Site` (nếu có) là `same-origin`, POST/PATCH phải `application/json`. Đăng nhập cũng kiểm tra Origin/Sec-Fetch-Site/JSON.
+  - Giới hạn đăng nhập: 5 lần sai/15 phút/địa chỉ, 30 lần sai/15 phút tổng → 429 + Retry-After; kiểm tra trước khi đọc DB hay băm. Lỗi chung "Tên đăng nhập hoặc mật khẩu không đúng".
+  - Log chỉ ghi "admin login from/failed from <địa chỉ>"; không ghi tên đã nhập, mật khẩu, cookie, token.
+- **CLI** (`server admin …`, `cmd/server/admin_cli.go`): `create <tên>`, `reset-password`, `logout-all`, `status`. Mật khẩu hỏi 2 lần không hiện ký tự (x/term) hoặc dòng đầu stdin; 12–128 ký tự; một tài khoản (unique index `admin_users_single`). Không có tài khoản/mật khẩu mặc định.
+- **Giao diện:** mở trang là đọc ngay. Header: "Đọc tin", "Đăng nhập quản trị" (khách) / "Nguồn tin", "Đăng xuất" (quản trị). Form thêm nguồn và thẻ nguồn chỉ hiện sau khi đăng nhập (và backend vẫn từ chối nếu gọi trực tiếp). Phiên hết hạn giữa chừng → về màn hình đăng nhập với thông báo. CSRF token chỉ giữ trong bộ nhớ trang.
+- **Báo lỗi qua email:** giữ nguyên hành vi (mailto chỉ chứa URL đã nhập). Địa chỉ nhận không còn nằm trong `importer.js` công khai; lấy từ `REPORT_EMAIL` (mặc định như cũ) và chỉ trả cho quản trị viên trong `/api/admin/session`.
+- **Cấu hình mới:** `COOKIE_SECURE` (false/true), `ADMIN_SESSION_TTL`, `ADMIN_SESSION_IDLE`, `REPORT_EMAIL` (compose.yaml, .env.example). Dependency mới: `golang.org/x/crypto` (argon2), `golang.org/x/term`.
+
+## 3. Lỗi phát hiện khi kiểm tra, đã sửa
+
+- `PATCH /api/admin/publishers/{adapter}` với `{"country":null}` bị trả 400 (JSON `null` giải mã thành con trỏ nil, không phân biệt được với thiếu khoá) → đổi sang map để phân biệt; có test.
+- Mobile 375px: ô chọn quốc gia trong khung "Quốc gia của website" tràn 11px → thêm `min-width:0`/`max-width:100%`; đo lại không tràn.
+- Test thời hạn phiên 2 s chập chờn do đồng hồ VM Colima lệch ~0,1 s giữa container → tăng biên (TTL 1 s, chờ 2,5 s); không phải lỗi app.
+
+## 4. Kiểm tra
+
+Chi tiết số liệu: VALIDATION.md (Lượt 9). Tóm tắt: migration giữ nguyên dữ liệu (1371 bài/1233 toàn văn/23 nguồn) và chạy lại an toàn; Go 82/82 (PostgreSQL 17 tạm), Node 23/23, vet/gofmt sạch, govulncheck không có lỗ hổng có đường gọi; mọi API quản trị từ chối khách, Bearer cũ, header giả local và cookie giả; quản trị viên đăng nhập, import, sửa quốc gia, bật/tắt, xoá trên stack thử (bản sao dữ liệu); đăng xuất/hết hạn/idle/giới hạn đăng nhập hoạt động; Chrome desktop thật; mobile 375px chỉ bằng giả lập.
+
+Test mới: `auth_test.go` (hash, khách bị từ chối mọi route quản trị, API công khai chỉ đọc, CSRF đăng nhập + giới hạn, thuộc tính cookie, luồng đăng nhập/CSRF/đăng xuất, hết hạn tuyệt đối/idle/TTL ngắn, giới hạn với DB, CLI, API công khai không lộ dữ liệu quản trị), `countries_test.go` (lọc quốc gia kết hợp + phân trang + chấm đỏ không đổi, quản trị quốc gia website, chạy lại migration), `tests/filters.test.js`, bổ sung `seen.test.js`, `importer.test.js`.
+
+## 5. Giới hạn còn lại
+
+- Một quản trị viên; không có đăng ký, phân vai, 2FA, khôi phục mật khẩu qua email. Giới hạn đăng nhập nằm trong bộ nhớ (mất khi khởi động lại; nhiều instance thì mỗi instance đếm riêng).
+- Sau reverse proxy mọi request cùng địa chỉ nguồn → giới hạn theo địa chỉ thành giới hạn chung (khoá cả quản trị viên tối đa 15 phút nếu bị dò); nên rate limit ở proxy. Chưa triển khai/kiểm tra qua HTTPS thật (`COOKIE_SECURE=true` chỉ được kiểm bằng unit test thuộc tính cookie).
+- Quốc gia chỉ gán được cho 3 website có adapter; chưa có nguồn Thái Lan/Trung Quốc (không thêm crawler mới trong lượt này).
+- Mobile 375px chỉ kiểm bằng giả lập; chưa thử trên điện thoại thật.
+- `.env` của bạn vẫn còn dòng `ADMIN_TOKEN`, `LOCAL_NO_AUTH` (tôi không sửa file bí mật của bạn); chúng không còn tác dụng, có thể xoá.
+- Chưa có tài khoản quản trị trên app local: cần chạy `docker compose exec app /app/server admin create <tên>`.

@@ -18,15 +18,15 @@ services:
     build: .
     environment:
       DATABASE_URL: postgres://news:${POSTGRES_PASSWORD}@db:5432/news?sslmode=disable
-      ADMIN_TOKEN: ${ADMIN_TOKEN:?Set ADMIN_TOKEN in .env}
       POLL_INTERVAL: ${POLL_INTERVAL:-2m}
       FULL_TEXT_ENABLED: ${FULL_TEXT_ENABLED:-true}
       LISTEN_ADDR: ':8080'
-      # Local mode without access code. The app accepts it only if the port
-      # below is published on loopback: PUBLISHED_HOST and the port mapping
-      # come from the same APP_BIND value.
-      LOCAL_NO_AUTH: ${LOCAL_NO_AUTH:-false}
-      PUBLISHED_HOST: ${APP_BIND:-127.0.0.1}
+      # Admin session cookie. COOKIE_SECURE=true whenever the app is served
+      # over HTTPS (reverse proxy); keep false only for http://127.0.0.1.
+      COOKIE_SECURE: ${COOKIE_SECURE:-false}
+      ADMIN_SESSION_TTL: ${ADMIN_SESSION_TTL:-12h}
+      ADMIN_SESSION_IDLE: ${ADMIN_SESSION_IDLE:-2h}
+      REPORT_EMAIL: ${REPORT_EMAIL:-}
     ports:
       - '${APP_BIND:-127.0.0.1}:${APP_PORT:-8080}:8080'
     depends_on:

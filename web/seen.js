@@ -43,9 +43,10 @@
       },
       // Mark a category seen up to the cursor of a list the user opened and
       // that loaded successfully. Background refreshes, the "all" view and
-      // lists narrowed by source or search do not count as seeing the category.
-      markSeen(slug, cursor, { userAction, query, source } = {}) {
-        if (!state || !slug || !userAction || query || source || !valid(cursor)) return false;
+      // lists narrowed by source, country or search do not count as seeing
+      // the category: the user only saw part of it.
+      markSeen(slug, cursor, { userAction, query, source, country } = {}) {
+        if (!state || !slug || !userAction || query || source || country || !valid(cursor)) return false;
         if (!(slug in state.cursors) || cursor > state.cursors[slug]) { state.cursors[slug] = cursor; save(); }
         return true;
       },
