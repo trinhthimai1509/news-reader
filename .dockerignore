@@ -7,3 +7,5 @@ bin
 *.log
 backups
 demo
+# macOS metadata files (created on exFAT/FAT drives).
+**/._*
