@@ -1,0 +1,3 @@
+ ---> 6db696c50f53
+Step 3/17 : COPY go.mod go.sum ./
+failed to get destination image "sha256:6db696c50f53870edc4f4bd35b22515451accf0b09d704c3ce164a973440f8cf": image with reference sha256:6db696c50f53870edc4f4bd35b22515451accf0b09d704c3ce164a973440f8cf was found but does not provide the specified platform (linux/amd64)

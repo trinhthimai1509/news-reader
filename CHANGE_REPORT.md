@@ -664,3 +664,89 @@ Test mới: `auth_test.go` (hash, khách bị từ chối mọi route quản tr�
 - Mobile 375px chỉ kiểm bằng giả lập; chưa thử trên điện thoại thật.
 - `.env` của bạn vẫn còn dòng `ADMIN_TOKEN`, `LOCAL_NO_AUTH` (tôi không sửa file bí mật của bạn); chúng không còn tác dụng, có thể xoá.
 - Chưa có tài khoản quản trị trên app local: cần chạy `docker compose exec app /app/server admin create <tên>`.
+
+---
+
+# Lượt 10 — lượt đọc từng bài, phiên đang hoạt động, chuyên mục v2 (2026-10-07)
+
+## 1. Thống kê
+
+- **Diễn biến:** bản đầu của lượt có "Lượt truy cập" toàn website + "Đang hoạt động gần đây" (migration `014`, đã chạy trên app local lúc 10:22 UTC). Theo yêu cầu điều chỉnh cùng ngày: bỏ "Lượt truy cập", thay bằng lượt đọc từng bài; nhãn "Đang hoạt động"; bỏ mọi giải thích trên giao diện. Migration `016` xoá `visit_totals`/`visit_events`; số cũ (5 lượt) **không** chuyển thành lượt đọc (còn trong bản sao lưu).
+- **Giao diện:** "Lượt đọc: N" trong dòng thông tin của mỗi thẻ bài (sau giờ đăng) và trong màn hình đọc bài (cập nhật theo số máy chủ trả sau khi tính); "Đang hoạt động: M" ở dòng nhỏ dưới tiêu đề "Tin mới". Không có chú thích, tooltip, "cách tính". Lỗi → "—", không phải 0.
+- **Lượt đọc** (`web/stats.js`, `cmd/server/stats.go`): gửi `read` chỉ sau khi bài tải và hiện thành công. Máy chủ tính một lượt cho mỗi (phiên, bài): khoá chính `article_reads(session_hash, article_id)` + khoá advisory theo phiên trong cùng giao dịch → mở lại, reload, nhiều tab, retry, request song song đều không đếm trùng. Phiên kết thúc sau 30 phút không có sự kiện (trình duyệt đổi mã; máy chủ cũng xoá dấu của phiên đó khi gặp lại) → đọc lại được tính. Bài bị ẩn/không tồn tại → 404, không ghi gì. Gộp bài trùng (`dedup.go`) cộng dồn lượt đọc vào bài giữ lại. Mọi bài bắt đầu từ 0.
+- **Đang hoạt động:** như bản đầu: heartbeat khi tab hiện + có thao tác trong 5 phút, tối đa 1/phút cho cả trình duyệt; mở trang/quay lại tab gửi ngay; số đọc từ máy chủ sau heartbeat đầu (không hiện 0 sai lúc vừa mở); làm mới tối đa mỗi 60 s khi tab hiện; prerender chờ tới khi hiện.
+- **API:** `GET /api/stats` → `{active, active_window_seconds}`; bài trong `GET /api/articles` và `/api/articles/{id}` có `reads`. `POST /api/stats/events`: `{"type":"read","session_id","article_id"}` hoặc `{"type":"heartbeat","session_id"}`; `Origin` bắt buộc trùng `Host`, `Sec-Fetch-Site` same-origin, JSON ≤ 256 byte, không trường lạ. Giới hạn trong bộ nhớ: 120 request/phút/địa chỉ, 60 lượt đọc/phút/địa chỉ, 600 dòng mới/phút toàn site, 10.000 địa chỉ; 429 + `Retry-After`. Không dùng `X-Forwarded-For`.
+- **Lưu trữ:** `article_read_counts` (không dọn), `article_reads` (dọn khi phiên kết thúc), `visit_sessions` (dọn sau 1 giờ); dọn mỗi 10 phút theo lô 5.000, tối đa 20 lô/bảng. Không lưu IP, user-agent, tên đăng nhập.
+
+## 2. Chuyên mục v2
+
+- Thứ tự: Tất cả (bộ lọc tổng, không lưu DB) → Thời sự → Thế giới → Kinh tế → Khoa học công nghệ → Chính trị → Quân sự → Đời sống → Khác.
+- Migration `015_categories_v2.sql`: thêm `kinh-te`, `khoa-hoc-cong-nghe`, `chinh-tri`, `quan-su`; chuyển feed (cả feed đã xoá mềm) `kinh-doanh` → `kinh-te`, `cong-nghe` → `khoa-hoc-cong-nghe`, `giai-tri`/`the-thao`/`suc-khoe` → `khac`; xoá 5 chuyên mục cũ; đặt tên/thứ tự. Chỉ `sources.category` đổi; bài, URL, `article_feeds` giữ nguyên; chạy lại an toàn. Chính trị/Quân sự trống (không suy từ tiêu đề hay từ Thời sự/Thế giới).
+- Đồng bộ: thanh chuyên mục và bộ chọn trong Nguồn tin lấy từ API (tự cập nhật); `news.Catalog` (import) dùng chuyên mục mới; `GET /api/articles?category=<cũ/không tồn tại>` → 400; PATCH feed sang chuyên mục cũ → 400 (khoá ngoại).
+- **Chấm đỏ:** `seen.js` nâng cấp mốc đã xem một lần (`v: 2`): đổi tên giữ mốc; Khác nhận mốc lớn nhất của Khác/Giải trí/Thể thao/Sức khỏe cũ → không có chấm đỏ giả (đánh đổi: vài bài chưa xem của Khác cũ có thể mất chấm). Chuyên mục mới nhận mốc hiện tại. Không hiện số.
+- Tên feed (vd. "VnExpress Kinh doanh", "VnExpress Thể thao") giữ nguyên; chỉ chuyên mục đổi.
+
+## 3. Kiểm tra
+
+Chi tiết: VALIDATION.md (Lượt 10). Sao lưu: `backups/news-before-visit-stats-20261007.dump` (trước 014), `backups/news-before-categories-reads-20261007.dump` (trước 015/016). Go 96/96 (PostgreSQL 17 tạm), Node 35/35, vet/gofmt sạch, govulncheck 0 lỗ hổng có đường gọi (chạy ở bản đầu của lượt; không thêm dependency sau đó), Docker build qua. Migration chạy trên bản sao dữ liệu thật (không mạng) và trên app thật: md5 bài + liên kết feed giống hệt trước/sau.
+
+## 4. Giới hạn còn lại
+
+- Không nhận diện được mọi bot, không chống được mọi thao tác thổi số (script tạo mã phiên mới: ≤ 60 lượt đọc/phút/địa chỉ, ≤ 600/phút toàn site); bot chạy JavaScript được đếm như người.
+- Lượt đọc không phải số người; trình duyệt chặn lưu trữ thì mỗi lần tải trang là phiên mới (đọc lại sau reload được tính thêm); `127.0.0.1` và `localhost` là hai phiên.
+- Sau reverse proxy: giới hạn theo địa chỉ thành giới hạn chung → có thể đếm thiếu. Chưa có cấu hình proxy tin cậy. Giới hạn tần suất nằm trong bộ nhớ.
+- Ranh giới 30 phút theo giờ máy chủ có thể lệch tới ~30 s (heartbeat không ghi lại trong 30 s).
+- Số "Lượt đọc" trên thẻ ở danh sách là số lúc tải danh sách (cập nhật khi tải lại/tự làm mới).
+- Chính trị, Quân sự chưa có feed. Một số bài chưa xem của Khác cũ có thể mất chấm đỏ do cách nâng cấp.
+- Chỉ kiểm bằng Chrome headless (desktop) và giả lập mobile 375px; **chưa kiểm trên điện thoại thật**; prerender, chặn lưu trữ và 30 phút không hoạt động được giả lập.
+
+---
+
+# Lượt 11 — dropdown tùy chỉnh (2026-10-07)
+
+## 1. Vì sao không chỉ sửa CSS
+
+Các ô chọn (Quốc gia nguồn, Nguồn; Quốc gia của website và Chuyên mục trong Nguồn tin) đều là `<select>` native. Menu của select native do trình duyệt/hệ điều hành vẽ, nằm ngoài trang: CSS không đặt được vị trí, khoảng cách hay chiều rộng của menu (trên macOS menu có thể đè lên ô). Vì vậy thay bằng dropdown tùy chỉnh.
+
+## 2. Đã làm
+
+- `web/dropdown.js` (mới, không thư viện ngoài): mẫu "select-only combobox" của WAI-ARIA APG.
+  - `<button role="combobox">` hiển thị giá trị đang chọn + mũi tên; `<ul role="listbox">` mở **bên dưới** ô, cách 6 px, **cùng chiều rộng**, cao tối đa 320 px và cuộn bên trong (`overscroll-behavior: contain`).
+  - Listbox gắn vào `<body>` (tọa độ theo ô), `z-index` cao: không bị container cắt hay nằm dưới nội dung khác.
+  - Còn ít chỗ phía dưới: menu **vẫn mở xuống**, cao tối thiểu 160 px, trang tự cuộn vừa đủ để hiện cả menu.
+  - `<select>` gốc vẫn nằm trong trang (ẩn) và là nguồn dữ liệu: code hiện có vẫn đọc/đặt `.value`, thêm option, nghe `change`. Dropdown bắn `input`/`change` khi người dùng chọn, cập nhật theo khi code đổi `.value`/`.selectedIndex`, thêm/xoá option hoặc `disabled`. Hành vi lọc, quản lý nguồn, giá trị đang chọn giữ nguyên.
+  - Chuột/chạm: bấm để mở/chọn; bấm ra ngoài đóng; bấm chữ của nhãn chỉ focus ô (như nhãn native); bấm vào thanh cuộn của menu không làm đóng menu.
+  - Bàn phím (focus luôn ở ô, option đang trỏ qua `aria-activedescendant`): ↓/↑ (hoặc Alt+↓) mở và di chuyển, Home/End, PageUp/PageDown, Enter/Space chọn, Escape đóng và trả focus, Tab đóng, gõ chữ để nhảy tới mục (bỏ dấu tiếng Việt: gõ "viet" ra "Việt Nam"). Focus rõ: viền xanh ở ô (`:focus-visible`), mục đang trỏ có nền + viền, mục đang chọn in đậm.
+  - Tên truy cập: nhãn của ô (`aria-labelledby`), không lẫn chữ các option.
+- `web/style.css`: mũi tên cách mép phải 14 px, căn giữa theo chiều dọc, quay lên khi mở; chữ dừng trước mũi tên (padding phải 2,75 rem, cắt bằng "…"). Bộ lọc có độ rộng cố định trên desktop (không nhảy khi đổi lựa chọn), xếp dọc trên mobile.
+- `web/app.js`: gọi `Dropdown.enhance` cho 2 bộ lọc và cho các ô tạo động trong Nguồn tin. `web/index.html`: nạp `dropdown.js`.
+- `tests/dropdown.test.js`: di chuyển bằng phím (bỏ qua mục disabled, dừng ở hai đầu), Home/End/Page, type-ahead không dấu và lặp chữ.
+- Không đổi backend, dữ liệu, migration.
+
+## 3. Kiểm tra
+
+- Node 38/38; Go 96/96 (PostgreSQL 17 tạm); Docker build qua. Sao lưu trước khi cập nhật app local: `backups/news-before-dropdown-20261007.dump` (12 bảng dữ liệu).
+- Chrome headless (profile tạm) trên stack thử từ bản sao dữ liệu: bản cũ (cổng 8082) và bản mới (8081), cùng database; tài khoản quản trị thử chỉ trên bản sao, stack đã xoá.
+  - Đo (desktop 1280): mũi tên cách mép phải 13,3 px, lệch tâm dọc 2 px (khung xoay của mũi tên); chữ cách mũi tên ≥ 20 px. Menu: cách ô 6 px, chênh rộng 0 px, lệch trái 0 px, cao 320 px, cuộn bên trong, điểm giữa menu thuộc menu (không bị đè). Danh sách 66 nước (Nguồn tin): cách 6 px, cùng rộng, cuộn.
+  - Chuột: chọn "BBC Business" → bộ lọc `source=4`, danh sách chỉ còn bài của feed này; bấm ra ngoài đóng. Bàn phím: ↓ mở (trỏ "Tất cả quốc gia"), ↓ → "Việt Nam", Escape đóng và giữ focus/giá trị; ↓ + gõ "vuong" → "Vương quốc Anh", Enter chọn → `country=GB`, bộ lọc nguồn thu còn 7 mục; Space mở, Home + Enter về "Tất cả"; Tab đóng; bấm chữ nhãn chỉ focus. Tìm kiếm giữ nguồn đã chọn.
+  - Nguồn tin: đổi chuyên mục một feed qua dropdown → đúng 1 `PATCH`, thẻ hiện "Chính trị"; đã đổi lại.
+  - Mobile **giả lập** 375×812 (chạm): menu nguồn cách 6 px, cùng rộng, nằm trong màn hình (32–343 px), cuộn; chạm chọn được; chạm ra ngoài đóng; scrollWidth 375. Màn hình thấp 375×560, ô nằm sát đáy (còn ~34 px): menu vẫn mở xuống, cao 160 px, trang cuộn 206 px để hiện đủ, cuộn trong menu không cuộn trang.
+- Ảnh trước/sau: `demo/dropdown-truoc-sau/` (thư mục local, không vào git/image): `before-*` (select native) và `after-*` (dropdown mới; desktop lọc, mở danh sách nguồn, bàn phím, Nguồn tin mở danh sách nước và chuyên mục; mobile 375 và màn hình thấp).
+  - **Hạn chế của ảnh "trước":** menu của select native là cửa sổ của hệ điều hành, Chrome headless không chụp được; ảnh `before-desktop-country-open.png` chỉ cho thấy ô đang focus. Hiện tượng menu đè lên ô dựa trên mô tả của bạn, không có ảnh chụp.
+- App local (8080) đã chạy bản mới: healthy, không có migration.
+
+## 4. Giới hạn
+
+- Chưa kiểm trên điện thoại thật, Safari hay Firefox, và chưa thử với trình đọc màn hình thật (chỉ kiểm thuộc tính ARIA và hành vi bàn phím).
+- Trên điện thoại, dropdown tùy chỉnh thay cho bánh xe/bảng chọn native của hệ điều hành.
+- Menu tự đặt lại vị trí khi đổi kích thước cửa sổ; nếu nội dung phía trên thay đổi chiều cao trong lúc menu đang mở, menu không dịch theo (đóng/mở lại là đúng vị trí).
+
+---
+
+# Giới hạn log và RAM trong compose.yaml (2026-10-07)
+
+- `compose.yaml`: log Docker `json-file` tối đa **3 file × 10 MB** cho mỗi container (khai báo một lần bằng `x-logging`, dùng cho `db` và `app`); `mem_limit` **database 384m, app 192m**, đổi được bằng `DB_MEM_LIMIT`, `APP_MEM_LIMIT` (thêm ghi chú vào `.env.example`; VPS 2 GB: 768m/384m). Giá trị lấy từ số đo ở `docs/DANH-GIA-VPS.md` (cao nhất ~77 MiB DB, ~14 MiB app với dữ liệu thật; ~240 MiB DB với 302 nghìn bài). Không đặt `memswap_limit` (lý do ở DANH-GIA-VPS, mục 9).
+- Áp dụng trên app local: sao lưu `backups/news-before-limits-20261007-2029.dump` (12 bảng dữ liệu, đọc lại được) và log cũ `backups/logs-before-limits-20261007-2029.txt` (tạo lại container sẽ xoá log cũ); `docker compose up -d` tạo lại cả hai container. Kiểm tra: `docker compose config` hợp lệ; `docker inspect` thấy Memory 402653184 / 201326592 byte và log `max-file:3 max-size:10m`; `docker stats` DB 34 MiB / 384 MiB, app 9 MiB / 192 MiB; bài/nguồn/tài khoản quản trị/lượt đọc trước và sau giống nhau (1955/23/1/2); app healthy.
+- Tài liệu: README (mục Docker Compose), `docs/DANH-GIA-VPS.md` (đánh dấu đã áp dụng), `docs/HUONG-DAN-VAN-HANH-VA-XU-LY-LOI.md` (A.6 log bị xoay vòng; C.1b xử lý OOM; C.0).
+- Chưa kiểm: hành vi OOM thật với giới hạn này trên VPS (trong lượt đo, không lần nào chạm giới hạn); swap trên VPS.
+

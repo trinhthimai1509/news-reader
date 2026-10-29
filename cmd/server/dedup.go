@@ -116,6 +116,12 @@ type pgxBeginner interface {
 }
 
 func mergeGroup(ctx context.Context, tx pgx.Tx, keep int64, ids []int64) error {
+	// Read counts of the copies add up on the kept article.
+	if _, e := tx.Exec(ctx, `INSERT INTO article_read_counts(article_id,reads)
+SELECT $1,sum(reads) FROM article_read_counts WHERE article_id=ANY($2) AND article_id<>$1 HAVING sum(reads)>0
+ON CONFLICT(article_id) DO UPDATE SET reads=article_read_counts.reads+EXCLUDED.reads`, keep, ids); e != nil {
+		return e
+	}
 	// Feeds of every copy, before the copies (and their rows) go away.
 	if _, e := tx.Exec(ctx, `INSERT INTO article_feeds(article_id,source_id,first_seen)
 SELECT $1,source_id,min(first_seen) FROM article_feeds WHERE article_id=ANY($2) GROUP BY source_id

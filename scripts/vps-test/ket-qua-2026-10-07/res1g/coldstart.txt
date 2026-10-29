@@ -1,0 +1,1 @@
+db ready .44s, app healthy .29s, total .73s

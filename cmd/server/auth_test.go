@@ -214,7 +214,7 @@ func TestGuestCannotReachAdminAPI(t *testing.T) {
 // The public API is read-only: no write method reaches a handler.
 func TestPublicRoutesAreReadOnly(t *testing.T) {
 	app := newTestApp(nil)
-	for _, p := range []string{"/api/articles", "/api/articles/1", "/api/sources", "/api/sources/1", "/api/categories", "/api/countries", "/api/admin/session", "/healthz"} {
+	for _, p := range []string{"/api/articles", "/api/articles/1", "/api/sources", "/api/sources/1", "/api/categories", "/api/countries", "/api/stats", "/api/admin/session", "/healthz"} {
 		for _, m := range []string{"POST", "PUT", "PATCH", "DELETE"} {
 			w := httptest.NewRecorder()
 			app.routes().ServeHTTP(w, httptest.NewRequest(m, p, strings.NewReader(`{}`)))
