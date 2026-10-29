@@ -11,6 +11,8 @@ WORKDIR /app
 COPY --from=build /server /app/server
 COPY web /app/web
 COPY migrations /app/migrations
+# Files from exFAT/FAT drives arrive as rwx------; let the app user read them.
+RUN chmod -R u=rwX,go=rX /app/web /app/migrations
 USER 10001:10001
 ENV LISTEN_ADDR=:8080
 EXPOSE 8080

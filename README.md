@@ -90,6 +90,13 @@ docker compose up --build -d
 
 Mở <http://127.0.0.1:8080>. Lượt lấy tin đầu tiên chạy ngay khi khởi động; toàn văn được lấy dần qua các lượt.
 
+> **Repo nằm trên ổ exFAT/FAT (USB, thẻ nhớ) trên macOS:** macOS tạo file `._*` mỗi khi ghi file, và Docker báo `failed to xattr ... ._<tên file>: operation not permitted`. Xoá chúng trước mỗi lần build:
+>
+> ```sh
+> dot_clean -n .
+> docker compose up --build -d
+> ```
+
 Image build sẽ chạy `go vet` và `go test`. Container app chạy bằng user không phải root, rootfs chỉ đọc, bỏ mọi capability. PostgreSQL không publish cổng ra host.
 
 ## Tài khoản quản trị
