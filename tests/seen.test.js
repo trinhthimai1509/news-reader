@@ -85,3 +85,40 @@ test('corrupt or unavailable storage falls back safely', () => {
   q.sync(slugs, 5);
   assert.strictEqual(q.cursor('khac'), 5, 'kept in memory when saving fails');
 });
+
+// Category list v2 (migration 015): stored cursors move to the new slugs
+// without creating a false red dot.
+test('v1 cursors are upgraded once: renames keep, merged into khac take the max', () => {
+  const st = storage();
+  st.setItem(KEY, JSON.stringify({ cursors: { 'thoi-su': 50, 'kinh-doanh': 100, 'cong-nghe': 200, 'giai-tri': 150, 'the-thao': 300, 'suc-khoe': 90, khac: 120 } }));
+  const s = create(st);
+  assert.deepStrictEqual(s.snapshot(), { 'thoi-su': 50, 'kinh-te': 100, 'khoa-hoc-cong-nghe': 200, khac: 300 });
+  assert.strictEqual(JSON.parse(st.m.get(KEY)).v, 2);
+  assert.doesNotMatch(s.param(), /(^|,)(kinh-doanh|cong-nghe|giai-tri|the-thao|suc-khoe):/);
+  // Not upgraded twice: a later markSeen survives a reload.
+  s.markSeen('khac', 400, { userAction: true });
+  assert.strictEqual(create(st).cursor('khac'), 400);
+});
+
+test('upgrade creates no false dot and new categories start without one', () => {
+  const st = storage();
+  // The reader had seen Thể thao up to 300 but Khác only up to 120.
+  st.setItem(KEY, JSON.stringify({ cursors: { 'the-thao': 300, khac: 120 } }));
+  const s = create(st);
+  const before = s.snapshot();
+  // 250: a sport story already seen in Thể thao; 350: new everywhere.
+  assert.strictEqual(isNew({ id: 250, categories: ['khac'] }, before), false);
+  assert.strictEqual(isNew({ id: 350, categories: ['khac'] }, before), true);
+  s.sync(['thoi-su', 'the-gioi', 'kinh-te', 'khoa-hoc-cong-nghe', 'chinh-tri', 'quan-su', 'doi-song', 'khac'], 400);
+  assert.strictEqual(isNew({ id: 390, categories: ['chinh-tri'] }, s.snapshot()), false);
+  assert.strictEqual(s.cursor('khac'), 300, 'sync keeps the upgraded cursor');
+});
+
+test('upgrade ignores bad values and a new browser starts at v2', () => {
+  const st = storage();
+  st.setItem(KEY, JSON.stringify({ cursors: { 'the-thao': 'x', 'kinh-doanh': -1, khac: 7 } }));
+  assert.deepStrictEqual(create(st).snapshot(), { khac: 7 });
+  const fresh = storage();
+  create(fresh).sync(['khac'], 10);
+  assert.strictEqual(JSON.parse(fresh.m.get(KEY)).v, 2);
+});

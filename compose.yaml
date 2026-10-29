@@ -1,3 +1,16 @@
+# Docker logs: at most 3 files of 10 MB per container (json-file rotates
+# them), so logs cannot fill the disk.
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: '10m'
+    max-file: '3'
+
+# RAM limits measured for a 1 GB VPS (docs/DANH-GIA-VPS.md): peak use was
+# ~77 MiB for PostgreSQL and ~14 MiB for the app with the real data, ~240 MiB
+# for PostgreSQL with 300k articles. Raise them in .env on a bigger machine
+# (2 GB VPS: DB_MEM_LIMIT=768m, APP_MEM_LIMIT=384m). A container above its
+# limit is stopped by the kernel (OOM) and restarted (restart: unless-stopped).
 services:
   db:
     image: postgres:17-alpine
@@ -13,6 +26,8 @@ services:
       interval: 5s
       timeout: 3s
       retries: 20
+    mem_limit: ${DB_MEM_LIMIT:-384m}
+    logging: *logging
     restart: unless-stopped
   app:
     build: .
@@ -36,6 +51,8 @@ services:
     read_only: true
     cap_drop: [ALL]
     security_opt: ['no-new-privileges:true']
+    mem_limit: ${APP_MEM_LIMIT:-192m}
+    logging: *logging
     restart: unless-stopped
 volumes:
   pgdata:

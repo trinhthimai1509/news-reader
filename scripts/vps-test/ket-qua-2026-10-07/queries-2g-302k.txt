@@ -1,0 +1,15 @@
+trang chủ (Tất cả, trang 1)        median     4.3 ms  max     8.2 ms  HTTP 200
+chuyên mục Thế giới               median     7.3 ms  max    63.0 ms  HTTP 200
+chuyên mục trống (Chính trị)     median     6.3 ms  max    47.2 ms  HTTP 200
+quốc gia GB                            median     2.3 ms  max     3.1 ms  HTTP 200
+quốc gia chưa xác định (không có) median   303.7 ms  max   522.7 ms  HTTP 200
+một feed giả lập (nguồn 118)     median     5.4 ms  max    17.1 ms  HTTP 200
+nguồn ít bài (Tuổi Trẻ Giáo dục, 28) median     5.9 ms  max     9.8 ms  HTTP 200
+tìm 'việt' (có nhiều kết quả)  median     3.1 ms  max     5.2 ms  HTTP 200
+tìm từ không có (quét toàn bộ)  median    95.8 ms  max   104.8 ms  HTTP 200
+trang 200                                median   122.4 ms  max   222.6 ms  HTTP 200
+danh sách chuyên mục + chấm đỏ (mốc cũ) median   486.4 ms  max   505.5 ms  HTTP 200
+danh sách chuyên mục (mốc mới)   median     1.1 ms  max     1.4 ms  HTTP 200
+chi tiết bài                          median     1.5 ms  max     9.7 ms  HTTP 200
+nguồn (bộ lọc)                     median     1.2 ms  max     1.4 ms  HTTP 200
+thống kê                              median     0.9 ms  max     6.2 ms  HTTP 200

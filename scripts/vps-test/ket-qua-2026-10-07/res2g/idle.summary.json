@@ -1,0 +1,1 @@
+{"name":"idle","load":null,"db_conn_max":3,"app_restart_oom_state":"0/false/running","seconds":59,"samples":59,"app":{"cur_max":3.9,"anon_max":3.3,"file_max":0,"cur_end":3.9,"cpu":{"avg":0.1,"max":2.1},"oom_kills":0},"db":{"cur_max":30.7,"anon_max":11,"file_max":17.2,"cur_end":30.7,"cpu":{"avg":0.5,"max":6.9},"oom_kills":0},"vm_avail_min_mib":1412}

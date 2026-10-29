@@ -20,26 +20,28 @@ type CatalogFeed struct {
 }
 
 // Catalog: the official feeds already configured and checked in this project.
-// Importing a home page adds these; nothing else is guessed.
+// Importing a home page adds these; nothing else is guessed. Categories follow
+// migration 015: feeds of the dropped categories (Giải trí, Thể thao, Sức
+// khỏe) are in "khac"; no feed is mapped to chinh-tri or quan-su.
 var Catalog = []CatalogFeed{
 	{"vnexpress", "https://vnexpress.net/rss/tin-moi-nhat.rss", "VnExpress", "khac", ""},
 	{"vnexpress", "https://vnexpress.net/rss/thoi-su.rss", "VnExpress Thời sự", "thoi-su", ""},
 	{"vnexpress", "https://vnexpress.net/rss/the-gioi.rss", "VnExpress Thế giới", "the-gioi", ""},
-	{"vnexpress", "https://vnexpress.net/rss/kinh-doanh.rss", "VnExpress Kinh doanh", "kinh-doanh", ""},
-	{"vnexpress", "https://vnexpress.net/rss/khoa-hoc-cong-nghe.rss", "VnExpress Khoa học công nghệ", "cong-nghe", ""},
-	{"vnexpress", "https://vnexpress.net/rss/giai-tri.rss", "VnExpress Giải trí", "giai-tri", ""},
-	{"vnexpress", "https://vnexpress.net/rss/the-thao.rss", "VnExpress Thể thao", "the-thao", ""},
-	{"vnexpress", "https://vnexpress.net/rss/suc-khoe.rss", "VnExpress Sức khỏe", "suc-khoe", ""},
+	{"vnexpress", "https://vnexpress.net/rss/kinh-doanh.rss", "VnExpress Kinh doanh", "kinh-te", ""},
+	{"vnexpress", "https://vnexpress.net/rss/khoa-hoc-cong-nghe.rss", "VnExpress Khoa học công nghệ", "khoa-hoc-cong-nghe", ""},
+	{"vnexpress", "https://vnexpress.net/rss/giai-tri.rss", "VnExpress Giải trí", "khac", ""},
+	{"vnexpress", "https://vnexpress.net/rss/the-thao.rss", "VnExpress Thể thao", "khac", ""},
+	{"vnexpress", "https://vnexpress.net/rss/suc-khoe.rss", "VnExpress Sức khỏe", "khac", ""},
 	{"vnexpress", "https://vnexpress.net/rss/gia-dinh.rss", "VnExpress Gia đình", "doi-song", ""},
 	{"bbc", "https://feeds.bbci.co.uk/news/rss.xml", "BBC News", "khac", "/news"},
 	{"bbc", "https://feeds.bbci.co.uk/news/world/rss.xml", "BBC World", "the-gioi", "/news/world"},
-	{"bbc", "https://feeds.bbci.co.uk/news/business/rss.xml", "BBC Business", "kinh-doanh", "/news/business"},
-	{"bbc", "https://feeds.bbci.co.uk/news/technology/rss.xml", "BBC Technology", "cong-nghe", "/news/technology"},
-	{"bbc", "https://feeds.bbci.co.uk/news/entertainment_and_arts/rss.xml", "BBC Entertainment & Arts", "giai-tri", "/news/entertainment_and_arts"},
-	{"bbc", "https://feeds.bbci.co.uk/news/health/rss.xml", "BBC Health", "suc-khoe", "/news/health"},
+	{"bbc", "https://feeds.bbci.co.uk/news/business/rss.xml", "BBC Business", "kinh-te", "/news/business"},
+	{"bbc", "https://feeds.bbci.co.uk/news/technology/rss.xml", "BBC Technology", "khoa-hoc-cong-nghe", "/news/technology"},
+	{"bbc", "https://feeds.bbci.co.uk/news/entertainment_and_arts/rss.xml", "BBC Entertainment & Arts", "khac", "/news/entertainment_and_arts"},
+	{"bbc", "https://feeds.bbci.co.uk/news/health/rss.xml", "BBC Health", "khac", "/news/health"},
 	{"tuoitre", "https://tuoitre.vn/thoi-su.rss", "Tuổi Trẻ Thời sự", "thoi-su", "/thoi-su.htm"},
 	{"tuoitre", "https://tuoitre.vn/the-gioi.rss", "Tuổi Trẻ Thế giới", "the-gioi", "/the-gioi.htm"},
-	{"tuoitre", "https://tuoitre.vn/kinh-doanh.rss", "Tuổi Trẻ Kinh doanh", "kinh-doanh", "/kinh-doanh.htm"},
+	{"tuoitre", "https://tuoitre.vn/kinh-doanh.rss", "Tuổi Trẻ Kinh doanh", "kinh-te", "/kinh-doanh.htm"},
 	{"tuoitre", "https://tuoitre.vn/video.rss", "Tuổi Trẻ Video", "khac", ""},
 }
 

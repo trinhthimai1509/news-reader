@@ -52,6 +52,7 @@ type Article struct {
 	Categories []string     `json:"categories"`
 	Country    string       `json:"country"` // of the publisher, not of the article's subject
 	HasVideo   bool         `json:"has_video"`
+	Reads      int64        `json:"reads"` // "Lượt đọc", see stats.go
 	Authors    []string     `json:"authors"`
 	Blocks     []news.Block `json:"blocks,omitempty"`
 	LeadImage  *news.Image  `json:"lead_image,omitempty"`
@@ -67,6 +68,7 @@ type App struct {
 	authCfg  authConfig
 	logins   *limiter
 	reportTo string // address of the "Báo lỗi qua email" button (admin only)
+	stats    statsGate
 }
 
 const (
@@ -98,6 +100,9 @@ func fail(w http.ResponseWriter, status int, msg string) {
 
 // articleCategories lists the categories of the non-deleted feeds that listed
 // article a, in display order.
+// articleReads is the read count of article a (0 before its first read).
+const articleReads = `coalesce((SELECT rc.reads FROM article_read_counts rc WHERE rc.article_id=a.id),0)`
+
 const articleCategories = `ARRAY(SELECT c.slug FROM categories c WHERE EXISTS(SELECT 1 FROM article_feeds af JOIN sources fs ON fs.id=af.source_id
  WHERE af.article_id=a.id AND NOT fs.deleted AND fs.category=c.slug) ORDER BY c.position)`
 
@@ -229,6 +234,19 @@ func (a *App) routes() http.Handler {
 			fail(w, 400, "Chuyên mục không hợp lệ")
 			return
 		}
+		// A removed category (e.g. kinh-doanh before migration 015) is an
+		// error, not an empty list.
+		if category != "" {
+			var known bool
+			if e := a.db.QueryRow(r.Context(), `SELECT EXISTS(SELECT 1 FROM categories WHERE slug=$1)`, category).Scan(&known); e != nil {
+				fail(w, 500, "Không đọc được tin")
+				return
+			}
+			if !known {
+				fail(w, 400, "Chuyên mục không tồn tại")
+				return
+			}
+		}
 		q := strings.TrimSpace(r.URL.Query().Get("q"))
 		if utf8.RuneCountInString(q) > 200 {
 			fail(w, 400, "Từ khoá quá dài")
@@ -255,7 +273,7 @@ func (a *App) routes() http.Handler {
 		// The source filter matches every feed that listed the article, not
 		// only the feed that delivered it first. The country is the one of
 		// the publisher (every feed of an article is on the same website).
-		rows, e := a.db.Query(r.Context(), `SELECT a.id,a.source_id,s.name,s.adapter,a.title,a.url,a.summary,a.content_status,a.published_at,a.fetched_at,`+articleCategories+`,coalesce(p.country,''),a.has_video
+		rows, e := a.db.Query(r.Context(), `SELECT a.id,a.source_id,s.name,s.adapter,a.title,a.url,a.summary,a.content_status,a.published_at,a.fetched_at,`+articleCategories+`,coalesce(p.country,''),a.has_video,`+articleReads+`
 FROM articles a JOIN sources s ON s.id=a.source_id JOIN publishers p ON p.adapter=s.adapter
 WHERE NOT s.deleted AND a.id <= $6
  AND ($1=0 OR EXISTS(SELECT 1 FROM article_feeds sf WHERE sf.article_id=a.id AND sf.source_id=$1))
@@ -271,7 +289,7 @@ ORDER BY a.published_at DESC,a.id DESC LIMIT $3 OFFSET $4`, source, like, pageSi
 		out := []Article{}
 		for rows.Next() {
 			var b Article
-			if rows.Scan(&b.ID, &b.SourceID, &b.Source, &b.Adapter, &b.Title, &b.URL, &b.Summary, &b.Status, &b.Published, &b.Fetched, &b.Categories, &b.Country, &b.HasVideo) != nil {
+			if rows.Scan(&b.ID, &b.SourceID, &b.Source, &b.Adapter, &b.Title, &b.URL, &b.Summary, &b.Status, &b.Published, &b.Fetched, &b.Categories, &b.Country, &b.HasVideo, &b.Reads) != nil {
 				fail(w, 500, "Không đọc được tin")
 				return
 			}
@@ -295,8 +313,8 @@ ORDER BY a.published_at DESC,a.id DESC LIMIT $3 OFFSET $4`, source, like, pageSi
 		}
 		var b Article
 		var body, blocks, lead []byte
-		e = a.db.QueryRow(r.Context(), `SELECT a.id,a.source_id,s.name,s.adapter,a.title,a.url,a.summary,a.paragraphs,a.content_status,a.published_at,a.fetched_at,`+articleCategories+`,coalesce(p.country,''),a.authors,a.blocks,a.lead_image,a.extract_version>=$2,a.has_video
-FROM articles a JOIN sources s ON s.id=a.source_id JOIN publishers p ON p.adapter=s.adapter WHERE a.id=$1 AND NOT s.deleted`, id, news.ExtractVersion).Scan(&b.ID, &b.SourceID, &b.Source, &b.Adapter, &b.Title, &b.URL, &b.Summary, &body, &b.Status, &b.Published, &b.Fetched, &b.Categories, &b.Country, &b.Authors, &blocks, &lead, &b.Enriched, &b.HasVideo)
+		e = a.db.QueryRow(r.Context(), `SELECT a.id,a.source_id,s.name,s.adapter,a.title,a.url,a.summary,a.paragraphs,a.content_status,a.published_at,a.fetched_at,`+articleCategories+`,coalesce(p.country,''),a.authors,a.blocks,a.lead_image,a.extract_version>=$2,a.has_video,`+articleReads+`
+FROM articles a JOIN sources s ON s.id=a.source_id JOIN publishers p ON p.adapter=s.adapter WHERE a.id=$1 AND NOT s.deleted`, id, news.ExtractVersion).Scan(&b.ID, &b.SourceID, &b.Source, &b.Adapter, &b.Title, &b.URL, &b.Summary, &body, &b.Status, &b.Published, &b.Fetched, &b.Categories, &b.Country, &b.Authors, &blocks, &lead, &b.Enriched, &b.HasVideo, &b.Reads)
 		if errors.Is(e, pgx.ErrNoRows) {
 			fail(w, 404, "Không tìm thấy bài")
 			return
@@ -324,6 +342,10 @@ FROM articles a JOIN sources s ON s.id=a.source_id JOIN publishers p ON p.adapte
 		send(w, 200, b)
 	})
 	public("/api/categories", a.handleCategories)
+	public("/api/stats", a.handleStats)
+	// The one public write: visit statistics only (see stats.go). It is not
+	// under /api/admin/, reads no admin cookie and opens nothing else.
+	mux.HandleFunc("POST /api/stats/events", a.handleStatsEvent)
 	public("/api/countries", a.handleCountries)
 	admin("POST /api/admin/sources/import", a.handleImport)
 	admin("GET /api/admin/publishers", a.handlePublishers)
@@ -878,6 +900,19 @@ func main() {
 				return
 			case <-t.C:
 				app.cleanSessions(ctx)
+			}
+		}
+	}()
+	// Expired stats event ids and idle stats sessions; the total is kept.
+	go func() {
+		t := time.NewTicker(statsCleanEvery)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				app.cleanStats(ctx)
 			}
 		}
 	}()

@@ -1,106 +1,218 @@
 # Personal News Reader
 
-Backend Go + PostgreSQL; frontend HTML/CSS/JavaScript thuần được Go phục vụ cùng origin. Không cần Node, Redis, hàng đợi ngoài hoặc dịch vụ dịch/AI. Docker Compose gồm 2 container: app và PostgreSQL. Chi phí máy chủ chưa được đo.
+Ứng dụng đọc tin cá nhân: tự động lấy tin từ RSS của **VnExpress**, **BBC News** và **Tuổi Trẻ Online**, lấy toàn văn bài (đoạn văn + ảnh theo đúng thứ tự), rồi hiển thị trong một giao diện web gọn, có tìm kiếm và bộ lọc theo chuyên mục, quốc gia của nguồn và nguồn báo.
 
-Trạng thái: đã chạy end-to-end trên máy local với nguồn thật (xem AUDIT_REPORT.md và CHANGE_REPORT.md). Chưa phải bản production. Lượt 9 (2026-10-06): đọc công khai, quản lý nguồn cần đăng nhập quản trị, lọc theo quốc gia của nguồn báo.
+- **Backend:** Go (1 binary), PostgreSQL.
+- **Frontend:** HTML/CSS/JavaScript thuần, được Go phục vụ cùng origin. Không cần Node, bundler, Redis, hàng đợi hay dịch vụ AI/dịch thuật.
+- **Triển khai:** Docker Compose gồm 2 container (`app` và `db`).
 
-## Tài liệu cho người vận hành
+> **Trạng thái:** đã chạy end-to-end trên máy local với nguồn thật. Chưa phải bản production (xem [Giới hạn đã biết](#giới-hạn-đã-biết)).
 
-- [docs/HUONG-DAN-VAN-HANH-VA-XU-LY-LOI.md](docs/HUONG-DAN-VAN-HANH-VA-XU-LY-LOI.md): khởi động, kiểm tra, tài khoản quản trị, quy trình điều tra lỗi, danh mục lỗi thường gặp, sao lưu/cập nhật/khôi phục, mẫu nhờ hỗ trợ và prompt cho AI.
-- [docs/GIAI-THICH-HE-THONG-VA-KY-THUAT.md](docs/GIAI-THICH-HE-THONG-VA-KY-THUAT.md): kiến trúc, luồng dữ liệu, adapter, worker, database, API, bảo mật, lựa chọn kỹ thuật, tài liệu hỗ trợ trình bày.
+## Mục lục
 
-## Chạy bằng Docker Compose
+- [Tính năng](#tính-năng)
+- [Kiến trúc](#kiến-trúc)
+- [Bắt đầu nhanh (Docker Compose)](#bắt-đầu-nhanh-docker-compose)
+- [Tài khoản quản trị](#tài-khoản-quản-trị)
+- [Cấu hình](#cấu-hình)
+- [Chạy Go trực tiếp](#chạy-go-trực-tiếp)
+- [Kiểm thử](#kiểm-thử)
+- [API](#api)
+- [Bảo mật](#bảo-mật)
+- [Vận hành](#vận-hành)
+- [Giới hạn đã biết](#giới-hạn-đã-biết)
+- [Tài liệu khác](#tài-liệu-khác)
+- [Giấy phép](#giấy-phép)
+
+## Tính năng
+
+### Cho người đọc (không cần đăng nhập)
+
+- Danh sách tin mới, phân trang 30 bài; đọc bài ngay trong app, luôn kèm tên nguồn và link gốc.
+- Nhãn trạng thái nội dung: **Toàn văn**, **Tóm tắt · đang chờ**, **Chỉ có tóm tắt**.
+- **Tìm kiếm** theo tiêu đề (không phân biệt hoa/thường) khi nhấn Enter/Tìm; xoá hết từ khoá thì tự trở về danh sách, giữ nguyên bộ lọc khác.
+- **Bộ lọc kết hợp được:** chuyên mục, quốc gia của nguồn, nguồn báo, từ khoá.
+- **Chuyên mục:** Tất cả, Thời sự, Thế giới, Kinh tế, Khoa học công nghệ, Chính trị, Quân sự, Đời sống, Khác. Bài thuộc chuyên mục của feed chứa nó (không đoán từ tiêu đề).
+- **Quốc gia của nguồn:** là quốc gia của toà soạn (VnExpress, Tuổi Trẻ → Việt Nam; BBC → Vương quốc Anh), *không phải* quốc gia được nhắc trong bài. Không suy đoán từ tên miền hay AI.
+- **Chấm đỏ bài mới** trên chip chuyên mục và cạnh tiêu đề: có bài mới từ lần cuối bạn mở chuyên mục đó (lưu trong `localStorage` của trình duyệt).
+- **Video:** MP4 của Tuổi Trẻ phát trực tiếp khi bấm "Xem video" (không autoplay); video VnExpress/BBC hiện poster + link "Xem video tại nguồn".
+- **Thống kê:** "Lượt đọc: N" cho từng bài và "Đang hoạt động: M" (số phiên có hoạt động trong 5 phút). Không lưu IP, user-agent hay tên đăng nhập.
+- Ảnh tải trực tiếp từ CDN của nguồn; icon nguồn lưu local trong `web/icons/`.
+
+### Cho quản trị viên
+
+- Màn hình **Nguồn tin**: dán URL trang chủ, RSS hoặc trang chuyên mục của VnExpress/BBC/Tuổi Trẻ → hệ thống tự nhận diện adapter, tên, chuyên mục, đọc thử RSS rồi thêm và bật feed. URL của website khác bị từ chối.
+- Sửa tên hiển thị và chuyên mục; bật/tắt (tắt = ngừng lấy tin mới, bài cũ vẫn đọc được); xoá mềm (thêm lại cùng URL sẽ khôi phục nguồn và bài).
+- Gán quốc gia cho từng website (danh sách sẵn ~66 nước).
+- Xem tiến độ lấy toàn văn / bổ sung ảnh, tác giả.
+
+### Worker lấy tin
+
+- Chạy ngay khi khởi động, sau đó theo `POLL_INTERVAL` (mặc định 2 phút); advisory lock trong PostgreSQL chống chạy trùng; hỗ trợ ETag/Last-Modified.
+- Các site chạy song song; trong một site, feed đọc lần lượt cách 1s, sau đó lấy tối đa 12 trang bài cách 1,5s. Gặp 429/503 thì dừng site đó trong lượt.
+- **Khử trùng:** URL được chuẩn hoá (bỏ `utm_*`, `at_*`, fragment…) và đặt UNIQUE; bài VnExpress khử trùng theo mã bài nên đổi slug không tạo bài mới.
+- **Toàn văn dạng blocks:** đoạn văn và ảnh theo thứ tự, caption/credit tách riêng, bỏ quảng cáo/widget/link liên quan. Trang không trích được (video, crossword, lỗi…) giữ tóm tắt RSS và thử lại tối đa 3 lần.
+
+## Kiến trúc
+
+```
+                ┌──────────────── container app ────────────────┐
+ Trình duyệt ──▶│ HTTP server (net/http)                         │
+  (web/*.js)    │  ├─ /            → file tĩnh trong web/        │
+                │  ├─ /api/*       → API đọc tin (công khai, GET)│
+                │  └─ /api/admin/* → quản trị (phiên + CSRF)     │
+                │ Worker định kỳ ──▶ RSS + trang bài của nguồn   │
+                └──────────────────────────┬────────────────────┘
+                                           ▼
+                                 PostgreSQL (container db)
+```
+
+| Thư mục | Nội dung |
+| --- | --- |
+| `cmd/server/` | Điểm vào: HTTP server, routes, worker, đăng nhập quản trị, CLI `admin`, thống kê, khử trùng |
+| `internal/news/` | Đọc RSS, trích toàn văn (VnExpress, BBC, Tuổi Trẻ), nhận diện URL khi thêm nguồn, video |
+| `web/` | Giao diện: `index.html`, `style.css`, các module JS, icon nguồn |
+| `migrations/` | SQL schema, áp dụng tuần tự một lần mỗi file (bảng `schema_migrations`) |
+| `tests/` | Test logic frontend (`node --test`) |
+| `scripts/vps-test/` | Script đo tải để chọn cấu hình VPS |
+| `docs/` | Tài liệu bổ sung (đánh giá VPS) |
+
+## Bắt đầu nhanh (Docker Compose)
+
+Yêu cầu: Docker và Docker Compose v2.
 
 ```sh
 cp .env.example .env
-# Đặt POSTGRES_PASSWORD, ví dụ: openssl rand -hex 32
-# Dùng chuỗi hex cho mật khẩu DB vì nó nằm trong DATABASE_URL.
+# Đặt POSTGRES_PASSWORD trong .env. Nên dùng chuỗi hex vì nó nằm trong DATABASE_URL:
+#   openssl rand -hex 32
 docker compose up --build -d
 ```
 
-Mở http://127.0.0.1:8080: đọc tin, tìm kiếm và lọc ngay, không cần mã hay đăng nhập. Lượt lấy tin đầu chạy ngay khi khởi động; toàn văn được lấy dần, tối đa 12 trang bài/site/lượt.
+Mở <http://127.0.0.1:8080>. Lượt lấy tin đầu tiên chạy ngay khi khởi động; toàn văn được lấy dần qua các lượt.
 
-### Tài khoản quản trị (quản lý nguồn)
+Image build sẽ chạy `go vet` và `go test`. Container app chạy bằng user không phải root, rootfs chỉ đọc, bỏ mọi capability. PostgreSQL không publish cổng ra host.
 
-Chỉ có **một** tài khoản quản trị, không có tài khoản hay mật khẩu mặc định. Khi chưa tạo, app vẫn đọc tin bình thường nhưng không ai vào được màn hình Nguồn tin.
+## Tài khoản quản trị
+
+Chỉ có **một** tài khoản quản trị và **không có mật khẩu mặc định**. Khi chưa tạo, app vẫn đọc tin bình thường nhưng không ai vào được màn hình Nguồn tin.
 
 ```sh
-docker compose exec app /app/server admin create <tên-đăng-nhập>   # tạo lần đầu; hỏi mật khẩu 2 lần, không hiện ký tự
+docker compose exec app /app/server admin create <tên-đăng-nhập>   # tạo lần đầu (hỏi mật khẩu 2 lần, không hiện ký tự)
 docker compose exec app /app/server admin reset-password           # đổi/quên mật khẩu; huỷ mọi phiên đang mở
 docker compose exec app /app/server admin logout-all               # đăng xuất mọi thiết bị
-docker compose exec app /app/server admin status                   # xem tên đăng nhập, số phiên còn hạn
+docker compose exec app /app/server admin status                   # xem tên đăng nhập và số phiên còn hạn
 ```
 
-- Mật khẩu 12–128 ký tự; chỉ lưu hash argon2id (bảng `admin_users`), không lưu plaintext, không in ra log.
-- Dùng trong script (không có terminal): mật khẩu đọc từ dòng đầu của stdin, ví dụ `docker compose exec -T app /app/server admin reset-password < file-chua-mat-khau`. Không đặt mật khẩu trên dòng lệnh (lưu vào lịch sử shell).
-- Chạy Go trực tiếp: `go run ./cmd/server admin create <tên>` (cần `DATABASE_URL`).
-- Tạo lần hai bị từ chối ("đã có tài khoản quản trị"); dùng `reset-password`.
+- Mật khẩu 12–128 ký tự, chỉ lưu hash **argon2id**.
+- Dùng trong script: mật khẩu đọc từ dòng đầu của stdin, ví dụ
+  `docker compose exec -T app /app/server admin reset-password < file-chua-mat-khau`.
+  Không truyền mật khẩu trên dòng lệnh.
+- Đăng nhập bằng nút **"Đăng nhập quản trị"** ở góc trên giao diện.
 
-**Đăng nhập:** bấm "Đăng nhập quản trị" ở góc trên, nhập tên và mật khẩu → mở màn hình Nguồn tin. **Đăng xuất:** nút "Đăng xuất"; phiên bị xoá ở server, cookie cũ không dùng lại được.
+## Cấu hình
 
-**Phiên và cookie:** phiên lưu phía server (bảng `admin_sessions`, chỉ lưu SHA-256 của cookie). Cookie `nr_admin`: `HttpOnly`, `SameSite=Strict`, `Path=/`. Hết hạn sau `ADMIN_SESSION_TTL` (mặc định 12h) kể từ lúc đăng nhập, hoặc sau `ADMIN_SESSION_IDLE` (mặc định 2h) không thao tác. Mọi request ghi cần thêm header `X-CSRF-Token` của phiên, cùng origin và body JSON. Sai đăng nhập 5 lần/15 phút từ một địa chỉ (hoặc 30 lần tổng) → 429; thông báo lỗi chung, không cho biết tên đăng nhập có tồn tại hay không.
+Các biến môi trường (đặt trong `.env` khi dùng Docker Compose):
 
-**Khi triển khai HTTPS** (sau reverse proxy): đặt `COOKIE_SECURE=true` trong `.env` rồi `docker compose up -d app`. Cookie khi đó có `Secure` và tên `__Host-nr_admin` (trình duyệt chỉ gửi qua HTTPS, đúng host). Giữ `APP_BIND=127.0.0.1` và để proxy nối vào cổng loopback. Sau proxy, mọi request có cùng địa chỉ nguồn (proxy), nên giới hạn đăng nhập theo địa chỉ thành giới hạn chung; nên đặt thêm rate limit ở proxy. Proxy phải giữ nguyên header `Host` và `Origin` (kiểm tra CSRF so Origin với Host).
-
-`ADMIN_TOKEN` và `LOCAL_NO_AUTH` của bản trước **không còn tác dụng** (app bỏ qua và ghi log nhắc). Có thể xoá hai dòng này khỏi `.env`.
-
-```sh
-docker compose logs -f app   # log
-docker compose stop          # dừng, giữ dữ liệu (chạy lại: docker compose start)
-docker compose down          # xoá container, giữ volume dữ liệu
-```
-
-Không dùng `down -v` (xoá dữ liệu). Cổng app chỉ bind 127.0.0.1 (đổi bằng `APP_PORT`); PostgreSQL không publish ra host. Truy cập từ xa cần reverse proxy HTTPS hoặc SSH tunnel. Image build chạy `go vet` và `go test`; container app chạy user không phải root, rootfs chỉ đọc.
+| Biến | Mặc định | Ý nghĩa |
+| --- | --- | --- |
+| `POSTGRES_PASSWORD` | *(bắt buộc)* | Mật khẩu PostgreSQL (Compose) |
+| `DATABASE_URL` | — | Chuỗi kết nối PostgreSQL (khi chạy Go trực tiếp; Compose tự tạo) |
+| `POLL_INTERVAL` | `2m` | Chu kỳ lấy tin, tối thiểu `1m` |
+| `FULL_TEXT_ENABLED` | `true` | `false` = chỉ lấy RSS, không lấy toàn văn |
+| `LISTEN_ADDR` | `127.0.0.1:8080` | Địa chỉ server lắng nghe (container dùng `:8080`) |
+| `APP_BIND` / `APP_PORT` | `127.0.0.1` / `8080` | Địa chỉ/cổng publish ra host (Compose) |
+| `COOKIE_SECURE` | `false` | Đặt `true` khi phục vụ qua HTTPS |
+| `ADMIN_SESSION_TTL` | `12h` | Thời hạn tối đa của phiên quản trị |
+| `ADMIN_SESSION_IDLE` | `2h` | Phiên hết hạn sau khoảng không thao tác này |
+| `REPORT_EMAIL` | *(có sẵn trong code)* | Địa chỉ nhận cho nút "Báo lỗi qua email" |
+| `DB_MEM_LIMIT` / `APP_MEM_LIMIT` | `384m` / `192m` | Giới hạn RAM container (VPS 2 GB: `768m` / `384m`) |
 
 ## Chạy Go trực tiếp
 
-Go >= 1.26 và PostgreSQL >= 16:
+Yêu cầu: Go ≥ 1.26, PostgreSQL ≥ 16. Chạy từ thư mục gốc của repo (vì `web/` và `migrations/` được đọc theo đường dẫn tương đối).
 
 ```sh
 export DATABASE_URL='postgres://news:password@localhost:5432/news?sslmode=disable'
-export POLL_INTERVAL=2m          # tối thiểu 1m
-export FULL_TEXT_ENABLED=true    # false: chỉ lấy RSS
-export LISTEN_ADDR=127.0.0.1:8080  # mặc định; container dùng :8080
-export COOKIE_SECURE=false        # true khi phục vụ qua HTTPS
-export ADMIN_SESSION_TTL=12h ADMIN_SESSION_IDLE=2h   # tuỳ chọn
-go test ./...
 go run ./cmd/server admin create <tên-đăng-nhập>   # một lần
 go run ./cmd/server
 ```
 
-Chạy từ thư mục gốc vì `web/` và `migrations/` được đọc theo đường dẫn tương đối. Migration trong `migrations/*.sql` được áp dụng một lần mỗi file (bảng `schema_migrations`), có advisory lock nên nhiều instance khởi động cùng lúc vẫn an toàn.
+Migration được áp dụng tự động khi khởi động, có advisory lock nên nhiều instance khởi động cùng lúc vẫn an toàn.
 
-Integration test cần một database **trống, dùng một lần** (mỗi test xoá và tạo lại schema `public`): `TEST_DATABASE_URL=postgres://... go test -p 1 ./cmd/server/`. Test logic frontend: `node --test tests/`.
+## Kiểm thử
 
-## Tính năng
+```sh
+go test ./...                 # unit test Go
+node --test tests/            # test logic frontend
+```
 
-- 19 feed: VnExpress (tin mới nhất + 8 chuyên mục), BBC News tiếng Anh (trang chủ + 5 mục) và Tuổi Trẻ Online (thử nghiệm: Thời sự, Thế giới, Kinh doanh, Video). Thêm bằng "Thêm nguồn" với URL như VnExpress `https://vnexpress.net/rss/<chuyen-muc>.rss`, BBC `https://feeds.bbci.co.uk/news/<section>/rss.xml`, Tuổi Trẻ `https://tuoitre.vn/<muc>.rss`, hoặc URL trang chủ. URL khác bị từ chối.
-- **Đọc tin công khai:** khách xem danh sách, đọc bài, tìm kiếm và lọc theo chuyên mục/quốc gia/nguồn mà không cần đăng nhập. Quản lý nguồn (import, thêm, sửa tên/chuyên mục/quốc gia, bật/tắt, xoá) chỉ dành cho quản trị viên, được kiểm tra ở backend (`/api/admin/*`).
-- **Quốc gia của nguồn báo:** là quốc gia của tòa soạn/website (VnExpress, Tuổi Trẻ → Việt Nam; BBC → Vương quốc Anh), **không phải** quốc gia được nhắc trong bài: bài BBC viết về Việt Nam vẫn thuộc Vương quốc Anh. Quốc gia gán theo website (bảng `publishers`, theo adapter) nên mọi feed của một website luôn cùng quốc gia; quản trị viên chọn/sửa ở khung "Quốc gia của website" trong màn hình Nguồn tin (danh sách sẵn ~66 nước, gồm Thái Lan, Trung Quốc). Website chưa gán hiển thị "Chưa xác định"; không suy đoán từ tên miền, tiêu đề hay AI. Quốc gia khác ngôn ngữ; không dịch bài. Bộ lọc "Quốc gia nguồn" chỉ liệt kê nước đang có nguồn, kết hợp với chuyên mục, nguồn và từ khoá; đổi bộ lọc về trang 1; danh sách nguồn thu theo quốc gia đã chọn.
-- Chuyên mục: Thời sự, Thế giới, Kinh doanh, Công nghệ, Giải trí, Thể thao, Sức khỏe, Đời sống, Khác. Mỗi feed được gán một chuyên mục (chọn khi thêm/sửa). Bài thuộc chuyên mục của mọi feed đã liệt kê nó (không đoán từ tiêu đề); feed tổng hợp vào Khác.
-- Chấm đỏ trên chip chuyên mục và cạnh tiêu đề bài: có bài hệ thống nhận sau lần cuối bạn mở chuyên mục đó trên trình duyệt này (lưu `localStorage`); không hiện số. Refresh nền, màn hình Tất cả, danh sách đang lọc nguồn/quốc gia/từ khoá và request lỗi không đánh dấu đã xem (mở chuyên mục khi đang lọc quốc gia không xoá chấm đỏ của cả chuyên mục).
-- Worker: chạy khi khởi động rồi mỗi 2 phút; advisory lock chống chạy trùng; ETag/Last-Modified. Hai site chạy song song; trong một site các feed đọc lần lượt cách 1s (tối đa 30s/feed), rồi tối đa 12 trang bài cách 1,5s trong 60s; 429/503 thì dừng site đó trong lượt.
-- Khử trùng: URL bài được chuẩn hoá (bỏ `utm_*`, `at_*`, fragment; BBC gom về `www.bbc.co.uk`) rồi UNIQUE trong PostgreSQL. Bài VnExpress dạng `<slug>-<mã>.html` khử trùng theo mã bài, nên đổi slug không tạo bài mới (link và tiêu đề đi theo slug mới); bản trùng cũ được hợp nhất khi khởi động.
-- Thêm nguồn (màn hình Nguồn tin, chỉ quản trị viên, luồng duy nhất): dán URL trang chủ, RSS hoặc trang chuyên mục đã có ánh xạ của VnExpress/BBC/Tuổi Trẻ rồi bấm "Thêm nguồn"; hệ thống tự nhận diện adapter, tên, chuyên mục (chưa rõ thì Khác), đọc thử RSS, thêm và bật feed, rồi cho worker chạy một lượt. URL bài viết và website khác bị từ chối, không tự crawl. Lỗi có nút "Báo lỗi qua email" (chỉ gửi URL đã nhập; địa chỉ nhận đặt bằng `REPORT_EMAIL`, mặc định như bản trước, chỉ trả cho quản trị viên đã đăng nhập). Tên hiển thị và chuyên mục sửa được trên thẻ nguồn; adapter và URL feed thì không.
-- Video: MP4 Tuổi Trẻ (trang /video/) phát trực tiếp từ CDN của nguồn khi bấm "Xem video" (không autoplay, không proxy; CSP media-src chỉ cdn2.tuoitre.vn). Video VnExpress, BBC và video trong bài Tuổi Trẻ chỉ hiện poster + "Xem video tại nguồn". Nhãn "Video" chỉ cho biết bài có video.
-- Icon nguồn (VnExpress, BBC, Tuổi Trẻ) lưu local trong `web/icons/`, không tải từ bên thứ ba.
-- Toàn văn dạng blocks: đoạn văn và ảnh theo đúng thứ tự (VnExpress `fck_detail`, BBC `data-block="text"|"image"`), kèm tác giả và ảnh đại diện. Caption/credit ảnh tách riêng; bỏ link liên quan, avatar, banner newsletter, poster video, widget. Video, Sounds, crossword, trang lỗi → giữ tóm tắt RSS (kèm ảnh RSS nếu có); thử lại tối đa 3 lần (cách 30 rồi 60 phút).
-- Ảnh hiển thị trực tiếp từ CDN của nguồn (`ichef.bbci.co.uk`, `*.vnecdn.net`, `cdn2.tuoitre.vn`; CSP chỉ cho phép các host này), không qua proxy. Ảnh lỗi hiện khung thông báo, nội dung giữ nguyên.
-- Bài đã lưu trước khi có ảnh/tác giả được bổ sung dần (tối đa 6 bài/site/lượt, sau tin mới); lỗi không ghi đè nội dung cũ. Tiến độ: màn hình Nguồn tin hoặc `GET /api/admin/status` (cần đăng nhập).
-- Đọc bài trong web luôn có tên nguồn và link gốc; nhãn "Toàn văn" / "Tóm tắt · đang chờ" / "Chỉ có tóm tắt".
-- Tìm theo tiêu đề (không phân biệt hoa/thường, `%`/`_` là ký tự thường) khi nhấn Enter/Tìm; xoá hết từ khoá (dấu X, phím xoá, khoảng trắng) tự trở về danh sách không lọc từ khoá, giữ chuyên mục và nguồn. Lọc chuyên mục và nguồn kết hợp được, phân trang 30 bài.
-- Nguồn: thêm, bật/tắt, xoá mềm. Tắt = dừng lấy tin mới, bài cũ vẫn đọc được. Xoá = ẩn nguồn và bài của nó; thêm lại cùng URL khôi phục nguồn và bài. Bài cũng có trong một feed khác đang bật sẽ chuyển sang feed đó.
-- Bảo mật: API đọc tin công khai chỉ nhận GET và chỉ trả dữ liệu cho người đọc (nguồn: id, tên, adapter, quốc gia; không có URL feed, lỗi, ETag, cấu hình hay log). Mọi thao tác ghi và thông tin vận hành nằm dưới `/api/admin/` và cần phiên quản trị + CSRF (xem trên); không còn Bearer token hay chế độ bỏ qua xác thực. Không lưu thông tin xác thực trong localStorage/sessionStorage/URL. Nội dung nguồn hiển thị bằng text (không render HTML); CSP chặt; worker chỉ kết nối tới IP công khai và chỉ theo redirect trong allowlist.
+Integration test cần một database **trống, dùng một lần** (mỗi test xoá và tạo lại schema `public`):
+
+```sh
+TEST_DATABASE_URL='postgres://...' go test -p 1 ./cmd/server/
+```
+
+## API
+
+API công khai chỉ nhận `GET` (trừ ghi thống kê) và chỉ trả dữ liệu cần cho người đọc.
+
+| Method | Đường dẫn | Mô tả |
+| --- | --- | --- |
+| GET | `/api/articles` | Danh sách bài (lọc theo chuyên mục, quốc gia, nguồn, từ khoá; phân trang) |
+| GET | `/api/articles/{id}` | Chi tiết bài |
+| GET | `/api/sources` | Danh sách nguồn (id, tên, adapter, quốc gia) |
+| GET | `/api/categories` | Danh sách chuyên mục |
+| GET | `/api/countries` | Danh sách quốc gia đang có nguồn |
+| GET | `/api/stats` | Lượt đọc, số phiên đang hoạt động |
+| POST | `/api/stats/events` | Ghi sự kiện thống kê (cùng origin, có giới hạn tần suất) |
+| GET | `/api/admin/session` | Trạng thái đăng nhập hiện tại |
+| GET | `/healthz` | Health check |
+
+Các route quản trị (cần phiên + header `X-CSRF-Token`): `POST /api/admin/login`, `POST /api/admin/logout`, `GET /api/admin/sources`, `POST /api/admin/sources/import`, `PATCH|DELETE /api/admin/sources/{id}`, `GET /api/admin/publishers`, `PATCH /api/admin/publishers/{adapter}`, `GET /api/admin/status`.
+
+## Bảo mật
+
+- Phiên quản trị lưu phía server (chỉ lưu SHA-256 của cookie). Cookie `nr_admin`: `HttpOnly`, `SameSite=Strict`; với `COOKIE_SECURE=true` đổi thành `__Host-nr_admin` có `Secure`.
+- Mọi request ghi của quản trị cần cùng origin, body JSON và header `X-CSRF-Token`.
+- Giới hạn đăng nhập sai: 5 lần/15 phút mỗi địa chỉ (30 lần tổng) → 429; thông báo lỗi không tiết lộ tên đăng nhập có tồn tại hay không.
+- Nội dung từ nguồn hiển thị dạng text (không render HTML); CSP chặt, chỉ cho phép ảnh/video từ CDN của các nguồn đã biết.
+- Worker chỉ kết nối tới IP công khai và chỉ theo redirect trong allowlist.
+- Không lưu thông tin xác thực trong `localStorage`, `sessionStorage` hay URL.
+
+### Triển khai qua HTTPS
+
+Đặt app sau reverse proxy HTTPS, giữ `APP_BIND=127.0.0.1`, đặt `COOKIE_SECURE=true` rồi `docker compose up -d app`. Proxy phải giữ nguyên header `Host` và `Origin`. Sau proxy mọi request có cùng địa chỉ nguồn, nên đặt thêm rate limit ở proxy (đặc biệt cho `POST /api/admin/login`).
+
+## Vận hành
+
+```sh
+docker compose logs -f app    # xem log
+docker compose stop           # dừng, giữ dữ liệu (chạy lại: docker compose start)
+docker compose down           # xoá container, giữ volume dữ liệu
+docker compose exec db pg_dump -U news -Fc news > backup.dump   # sao lưu
+```
+
+**Không** dùng `docker compose down -v` (lệnh này xoá dữ liệu). Log Docker bị giới hạn 3 × 10 MB mỗi container.
 
 ## Giới hạn đã biết
 
-- Một tài khoản quản trị; chưa có đăng ký, nhiều tài khoản, phân vai hay khôi phục mật khẩu qua email (reset bằng CLI trên máy chủ). Giới hạn đăng nhập nằm trong bộ nhớ app (reset khi khởi động lại).
-- Quốc gia chỉ gán được cho website đã có adapter (VnExpress, BBC, Tuổi Trẻ). Chọn được Thái Lan, Trung Quốc… nhưng chưa có nguồn nào của các nước đó; thêm nguồn mới cần adapter mới (ngoài phạm vi lượt này).
-
-- Lịch 2 phút là lịch kiểm tra, không phải SLA. Đo ngày 2026-10-05: feed VnExpress "tin mới nhất" chậm ~3 giờ so với trang chủ, feed chuyên mục thì mới. Chưa cam kết SLA 5 phút.
-- Feed tổng không chứa mọi bài của mọi chuyên mục; BBC feed tổng có cả Sport/Video/Sounds.
-- Không lấy video/bảng/đồ hoạ tương tác; bài đã lấy toàn văn không được cập nhật nếu nguồn sửa bài; `pubDate` của BBC là giờ cập nhật. Tác giả VnExpress chỉ có khi bài có dòng ký tên cuối bài.
+- Chu kỳ 2 phút là lịch kiểm tra, không phải SLA: feed VnExpress "tin mới nhất" từng chậm ~3 giờ so với trang chủ.
+- Chỉ hỗ trợ 3 website có adapter (VnExpress, BBC, Tuổi Trẻ); thêm website mới cần viết adapter.
+- Một tài khoản quản trị; chưa có nhiều tài khoản, phân vai hay khôi phục mật khẩu qua email.
+- Giới hạn tần suất (đăng nhập, thống kê) nằm trong bộ nhớ, reset khi khởi động lại; sau reverse proxy trở thành giới hạn chung.
+- Thống kê không chặn được mọi bot; lượt đọc không phải số người.
 - Cấu trúc trang nguồn có thể thay đổi; khi đó bài rơi về trạng thái "Chỉ có tóm tắt".
-- RSS công khai không đồng nghĩa với quyền dùng toàn văn. Kiểm tra điều kiện nguồn trước khi dùng công khai hoặc thương mại.
+- Không lấy bảng/đồ hoạ tương tác; bài đã lấy toàn văn không được cập nhật nếu nguồn sửa bài.
+- **RSS công khai không đồng nghĩa với quyền dùng toàn văn.** Kiểm tra điều khoản của từng nguồn trước khi dùng công khai hoặc thương mại.
 
-Xem AUDIT_REPORT.md (kết quả audit), VALIDATION.md (bằng chứng kiểm tra), HANDOVER.md (việc tiếp theo).
+## Tài liệu khác
+
+- [HANDOVER.md](HANDOVER.md): việc cần làm tiếp và ghi chú cho người phát triển.
+- [docs/DANH-GIA-VPS.md](docs/DANH-GIA-VPS.md): số đo RAM/CPU/đĩa để chọn VPS 1 GB hay 2 GB.
+- [AUDIT_REPORT.md](AUDIT_REPORT.md), [VALIDATION.md](VALIDATION.md), [CHANGE_REPORT.md](CHANGE_REPORT.md): kết quả audit, bằng chứng kiểm tra và lịch sử thay đổi.
+
+## Giấy phép
+
+Mã nguồn phát hành theo giấy phép [MIT](LICENSE).
+
+Giấy phép này **chỉ áp dụng cho mã nguồn** của dự án. Tên, logo (`web/icons/`) và nội dung bài viết lấy từ VnExpress, BBC, Tuổi Trẻ thuộc quyền của chủ sở hữu tương ứng và không nằm trong phạm vi giấy phép MIT.

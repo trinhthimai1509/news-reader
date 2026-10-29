@@ -127,7 +127,7 @@ func TestMigrationsConcurrentAndRepeatable(t *testing.T) {
 	}
 	var n, cats int
 	db.QueryRow(ctx, `SELECT count(*), (SELECT count(*) FROM categories) FROM schema_migrations`).Scan(&n, &cats)
-	if n != 13 || cats != 9 {
+	if n != 16 || cats != 8 {
 		t.Fatalf("migrations=%d categories=%d", n, cats)
 	}
 }
@@ -165,7 +165,9 @@ func TestCategoryMigrationPreservesData(t *testing.T) {
 	if after != before || links != before || full != before || thoiSu != 1 || legacy != before {
 		t.Fatalf("before=%d after=%d links=%d full=%d thoiSu=%d", before, after, links, full, thoiSu)
 	}
-	if vneFeeds != 9 || khac != 4 { // latest-news + thoi-su + 7 new section feeds; khac: both front pages, Gone and Tuổi Trẻ Video
+	// latest-news + thoi-su + 7 new section feeds; khac: both front pages,
+	// Gone, Tuổi Trẻ Video and, since 015, the 5 Giải trí/Thể thao/Sức khỏe feeds.
+	if vneFeeds != 9 || khac != 9 {
 		t.Fatalf("vnexpress feeds=%d khac=%d", vneFeeds, khac)
 	}
 }
@@ -173,7 +175,7 @@ func TestCategoryMigrationPreservesData(t *testing.T) {
 func TestCategoryMappingAndDedupAcrossFeeds(t *testing.T) {
 	a, ctx := migratedApp(t)
 	world := addSource(t, a, "World", "https://feeds.bbci.co.uk/news/t-world.xml", "the-gioi")
-	biz := addSource(t, a, "Biz", "https://feeds.bbci.co.uk/news/t-biz.xml", "kinh-doanh")
+	biz := addSource(t, a, "Biz", "https://feeds.bbci.co.uk/news/t-biz.xml", "kinh-te")
 	front := addSource(t, a, "Front", "https://feeds.bbci.co.uk/news/t-front.xml", "khac")
 	now := time.Now()
 	a.ingest(ctx, world, []news.Item{item("x", "Shared story", now)}, now)
@@ -190,23 +192,23 @@ func TestCategoryMappingAndDedupAcrossFeeds(t *testing.T) {
 	}
 	for _, it := range l.Items {
 		if it.Title == "Shared story" {
-			if fmt.Sprint(it.Categories) != "[the-gioi kinh-doanh khac]" || it.SourceID != world.ID {
+			if fmt.Sprint(it.Categories) != "[the-gioi kinh-te khac]" || it.SourceID != world.ID {
 				t.Fatalf("shared: owner=%d categories=%v", it.SourceID, it.Categories)
 			}
 		}
 	}
-	get(t, a, "/api/articles?category=kinh-doanh", &l)
+	get(t, a, "/api/articles?category=kinh-te", &l)
 	if len(l.Items) != 2 {
-		t.Fatalf("kinh-doanh: %d", len(l.Items))
+		t.Fatalf("kinh-te: %d", len(l.Items))
 	}
-	get(t, a, "/api/articles?category=the-thao", &l)
+	get(t, a, "/api/articles?category=quan-su", &l)
 	if len(l.Items) != 0 {
 		t.Fatal("empty category returned items")
 	}
 	// Moving a feed to another category moves its mapping; deleting a feed
 	// removes its category but the owner rule for readability is unchanged.
 	a.db.Exec(ctx, `UPDATE sources SET deleted=true WHERE id=$1`, biz.ID)
-	get(t, a, "/api/articles?category=kinh-doanh", &l)
+	get(t, a, "/api/articles?category=kinh-te", &l)
 	if len(l.Items) != 0 {
 		t.Fatalf("deleted feed still maps: %d", len(l.Items))
 	}
@@ -241,7 +243,7 @@ func TestDeletedSourceArticlesMoveToActiveFeed(t *testing.T) {
 func TestNewArticleCounts(t *testing.T) {
 	a, ctx := migratedApp(t)
 	world := addSource(t, a, "World", "https://feeds.bbci.co.uk/news/t-world.xml", "the-gioi")
-	health := addSource(t, a, "Health", "https://feeds.bbci.co.uk/news/t-health.xml", "suc-khoe")
+	health := addSource(t, a, "Health", "https://feeds.bbci.co.uk/news/t-health.xml", "doi-song")
 	now := time.Now()
 	a.ingest(ctx, world, []news.Item{item("old1", "Old 1", now), item("old2", "Old 2", now)}, now)
 
@@ -251,8 +253,8 @@ func TestNewArticleCounts(t *testing.T) {
 	if c.Cursor == 0 || c.Categories[0].NewCount != 0 {
 		t.Fatalf("baseline: %+v", c)
 	}
-	seen := fmt.Sprintf("the-gioi:%d,suc-khoe:%d", c.Cursor, c.Cursor)
-	if n := newCounts(t, a, seen); n["the-gioi"] != 0 || n["suc-khoe"] != 0 {
+	seen := fmt.Sprintf("the-gioi:%d,doi-song:%d", c.Cursor, c.Cursor)
+	if n := newCounts(t, a, seen); n["the-gioi"] != 0 || n["doi-song"] != 0 {
 		t.Fatalf("nothing new yet: %v", n)
 	}
 	// A late article (published two days ago) arrives, listed by both feeds,
@@ -261,23 +263,23 @@ func TestNewArticleCounts(t *testing.T) {
 	a.ingest(ctx, world, []news.Item{late}, now)
 	a.ingest(ctx, health, []news.Item{late, item("old1", "Old 1", now)}, now)
 	n := newCounts(t, a, seen)
-	if n["the-gioi"] != 1 || n["suc-khoe"] != 1 || n["khac"] != 0 {
+	if n["the-gioi"] != 1 || n["doi-song"] != 1 || n["khac"] != 0 {
 		t.Fatalf("late article must count once per category: %v", n)
 	}
 	// Opening the category loads a list with a cursor; marking seen up to it
 	// clears the count, and an article arriving afterwards is new again.
 	var l listResp
 	get(t, a, "/api/articles?category=the-gioi", &l)
-	seen = fmt.Sprintf("the-gioi:%d,suc-khoe:%d", l.Cursor, c.Cursor)
+	seen = fmt.Sprintf("the-gioi:%d,doi-song:%d", l.Cursor, c.Cursor)
 	a.ingest(ctx, world, []news.Item{item("after", "After", now)}, now)
 	n = newCounts(t, a, seen)
-	if n["the-gioi"] != 1 || n["suc-khoe"] != 1 {
+	if n["the-gioi"] != 1 || n["doi-song"] != 1 {
 		t.Fatalf("after marking seen: %v", n)
 	}
 	// Articles of a deleted owner are not readable, so not counted.
 	a.db.Exec(ctx, `UPDATE sources SET deleted=true WHERE id=$1`, world.ID)
 	n = newCounts(t, a, seen)
-	if n["the-gioi"] != 0 || n["suc-khoe"] != 0 {
+	if n["the-gioi"] != 0 || n["doi-song"] != 0 {
 		t.Fatalf("deleted owner still counted: %v", n)
 	}
 	if code := get(t, a, "/api/categories?seen=bad", nil); code != 400 {
@@ -304,7 +306,7 @@ func TestListCursorCoversOnlyListedArticles(t *testing.T) {
 func TestCombinedFiltersAndPaging(t *testing.T) {
 	a, ctx := migratedApp(t)
 	world := addSource(t, a, "World", "https://feeds.bbci.co.uk/news/t-world.xml", "the-gioi")
-	biz := addSource(t, a, "Biz", "https://feeds.bbci.co.uk/news/t-biz.xml", "kinh-doanh")
+	biz := addSource(t, a, "Biz", "https://feeds.bbci.co.uk/news/t-biz.xml", "kinh-te")
 	now := time.Now()
 	var w, b []news.Item
 	for i := 0; i < 35; i++ {
@@ -322,12 +324,12 @@ func TestCombinedFiltersAndPaging(t *testing.T) {
 		page1, all int
 	}{
 		{"category=the-gioi", 30, 35},
-		{"category=kinh-doanh", 11, 11},
-		{"category=kinh-doanh&q=election", 6, 6},
-		{fmt.Sprintf("category=kinh-doanh&source=%d&q=election", world.ID), 1, 1},
+		{"category=kinh-te", 11, 11},
+		{"category=kinh-te&q=election", 6, 6},
+		{fmt.Sprintf("category=kinh-te&source=%d&q=election", world.ID), 1, 1},
 		{fmt.Sprintf("source=%d", biz.ID), 11, 11},
 		{"q=Election", 30, 40},
-		{"category=the-thao&q=election", 0, 0},
+		{"category=quan-su&q=election", 0, 0},
 	}
 	for _, c := range cases {
 		var l listResp
@@ -505,7 +507,7 @@ func TestVnExpressSlugChangeKeepsOneArticle(t *testing.T) {
 func TestMergeDuplicatesKeepsBestContent(t *testing.T) {
 	a, ctx := migratedApp(t)
 	front := addVnSource(t, a, "VnE", "https://vnexpress.net/rss/t-moi.rss", "khac")
-	sport := addVnSource(t, a, "VnE Thể thao", "https://vnexpress.net/rss/t-the-thao.rss", "the-thao")
+	sport := addVnSource(t, a, "VnE Thể thao", "https://vnexpress.net/rss/t-the-thao.rss", "doi-song")
 	bbc := addSource(t, a, "BBC", "https://feeds.bbci.co.uk/news/t.xml", "khac")
 	pub := time.Date(2026, 10, 5, 4, 15, 0, 0, time.UTC)
 	ins := func(src int64, url, title, status string, version int, blocks, authors string, fetched time.Time) int64 {
@@ -541,7 +543,7 @@ VALUES($1,$2,$3,'Sum',$4,$5,$6,$7,'["p1"]',$8::jsonb,$9::text[]) RETURNING id`, 
 		t.Fatalf("kept article: %d", code)
 	}
 	if art.URL != "https://vnexpress.net/thu-mon-vozinha-5128310.html" || art.Title != "Thủ môn Vozinha" || art.Status != "full" ||
-		len(art.Blocks) != 3 || art.Blocks[1].Image.Caption != "Cap" || fmt.Sprint(art.Authors) != "[An]" || fmt.Sprint(art.Categories) != "[the-thao khac]" {
+		len(art.Blocks) != 3 || art.Blocks[1].Image.Caption != "Cap" || fmt.Sprint(art.Authors) != "[An]" || fmt.Sprint(art.Categories) != "[doi-song khac]" {
 		t.Fatalf("merged: %+v", art)
 	}
 	if code := get(t, a, fmt.Sprintf("/api/articles/%d", dup), nil); code != 404 {
@@ -622,7 +624,7 @@ func TestTuoiTreIngest(t *testing.T) {
 	}
 	var art Article
 	get(t, a, fmt.Sprintf("/api/articles/%d", id), &art)
-	if fmt.Sprint(art.Categories) != "[thoi-su kinh-doanh]" || art.Adapter != "tuoitre" || art.Source != "Tuổi Trẻ Thời sự" {
+	if fmt.Sprint(art.Categories) != "[thoi-su kinh-te]" || art.Adapter != "tuoitre" || art.Source != "Tuổi Trẻ Thời sự" {
 		t.Fatalf("%+v", art)
 	}
 }
@@ -770,7 +772,7 @@ func TestImportHomePageKeepsUserSettings(t *testing.T) {
 	}
 	a.db.QueryRow(ctx, `SELECT enabled FROM sources WHERE feed_url='https://vnexpress.net/rss/kinh-doanh.rss'`).Scan(&enabled)
 	a.db.QueryRow(ctx, `SELECT category FROM sources WHERE feed_url='https://vnexpress.net/rss/suc-khoe.rss'`).Scan(&cat)
-	if !enabled || cat != "suc-khoe" {
+	if !enabled || cat != "khac" { // catalog maps Sức khỏe to Khác (migration 015)
 		t.Fatalf("re-enable %v / catalog category %s", enabled, cat)
 	}
 	select {
@@ -898,12 +900,12 @@ func TestEditSourceNameAndCategory(t *testing.T) {
 	patch := func(body string) int {
 		return adminFor(t, a).do("PATCH", fmt.Sprintf("/api/admin/sources/%d", s.ID), body).Code
 	}
-	if c := patch(`{"name":"  Khoa học BBC  ","category":"cong-nghe","adapter":"vnexpress","feed_url":"https://vnexpress.net/rss/x.rss"}`); c != 200 {
+	if c := patch(`{"name":"  Khoa học BBC  ","category":"khoa-hoc-cong-nghe","adapter":"vnexpress","feed_url":"https://vnexpress.net/rss/x.rss"}`); c != 200 {
 		t.Fatal(c)
 	}
 	var name, cat, adapter, feed string
 	a.db.QueryRow(ctx, `SELECT name,category,adapter,feed_url FROM sources WHERE id=$1`, s.ID).Scan(&name, &cat, &adapter, &feed)
-	if name != "Khoa học BBC" || cat != "cong-nghe" || adapter != "bbc" || feed != "https://feeds.bbci.co.uk/news/t-x.xml" {
+	if name != "Khoa học BBC" || cat != "khoa-hoc-cong-nghe" || adapter != "bbc" || feed != "https://feeds.bbci.co.uk/news/t-x.xml" {
 		t.Fatalf("%s %s %s %s", name, cat, adapter, feed)
 	}
 	for _, b := range []string{`{"name":"   "}`, `{"name":"` + strings.Repeat("x", 101) + `"}`, `{"adapter":"vnexpress"}`, `{"category":"BAD"}`} {

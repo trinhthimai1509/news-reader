@@ -5,6 +5,27 @@
 // published date) is still new.
 (function (root) {
   const KEY = 'news-seen-v1';
+  const VERSION = 2;
+  // Category list v2 (migration 015). Renamed categories keep their cursor.
+  // The dropped ones were merged into "khac", which takes the highest cursor
+  // among them and the old "khac": an article above it was above the cursor
+  // of every old category it belonged to, so it already had a red dot — the
+  // change creates no false dot. The price: an article still unseen in the
+  // old Khác but below a newer cursor of a merged category loses its dot.
+  const MOVED = { 'kinh-doanh': 'kinh-te', 'cong-nghe': 'khoa-hoc-cong-nghe', 'giai-tri': 'khac', 'the-thao': 'khac', 'suc-khoe': 'khac' };
+
+  // Upgrades stored cursors of an older version (no "v") in place.
+  function upgrade(state) {
+    if (state.v === VERSION) return false;
+    const c = state.cursors;
+    for (const [from, to] of Object.entries(MOVED)) {
+      if (!(from in c)) continue;
+      if (Number.isSafeInteger(c[from]) && c[from] >= 0 && !(Number.isSafeInteger(c[to]) && c[to] >= c[from])) c[to] = c[from];
+      delete c[from];
+    }
+    state.v = VERSION;
+    return true;
+  }
 
   function memoryStorage() {
     const m = new Map();
@@ -19,6 +40,7 @@
       if (v && typeof v.cursors === 'object' && v.cursors) state = v;
     } catch { state = null; }
     const save = () => { try { storage.setItem(KEY, JSON.stringify(state)); } catch { /* private mode: keep in memory */ } };
+    if (state && upgrade(state)) save();
     const valid = n => Number.isSafeInteger(n) && n >= 0;
 
     return {
@@ -34,7 +56,7 @@
       // cursor above the server's (database restored) is clamped.
       sync(slugs, cursor) {
         if (!valid(cursor)) return;
-        if (!state) state = { cursors: {} };
+        if (!state) state = { v: VERSION, cursors: {} };
         let changed = false;
         for (const s of slugs) {
           if (!(s in state.cursors) || state.cursors[s] > cursor) { state.cursors[s] = cursor; changed = true; }
@@ -66,7 +88,7 @@
     return (article.categories || []).some(c => cursors[c] !== undefined && article.id > cursors[c]);
   }
 
-  const api = { create, loadAndMark, isNew, KEY };
+  const api = { create, loadAndMark, isNew, upgrade, KEY, VERSION };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   else root.SeenStore = api;
 })(typeof window !== 'undefined' ? window : globalThis);

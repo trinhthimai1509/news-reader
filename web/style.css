@@ -63,3 +63,28 @@
 .country-tag{font-size:.85rem;color:#536984}
 #login-form .error{margin:0;padding:.7rem 1rem}
 @media(max-width:650px){nav{flex-wrap:wrap}.publisher-row{flex-direction:column;align-items:stretch;gap:.4rem}}
+/* Statistics: "Đang hoạt động" under the heading, "Lượt đọc" in article meta. */
+.site-stats{margin:-.5rem 0 .9rem;font-size:.85rem;line-height:1.4;color:#536984}
+.site-stats b,.reads b{color:#24456f;font-weight:600;font-variant-numeric:tabular-nums}
+/* Custom dropdowns (dropdown.js) over hidden native selects. The chevron
+   sits 14 px from the right edge, centred; text stops before it. The list
+   opens 6 px below the field, same width, scrolls inside (max 320 px) and is
+   attached to <body> so no container clips it. */
+.dd{position:relative;width:100%;min-width:0}
+.dd-native{position:absolute;inset:0;width:100%;height:100%;opacity:0;pointer-events:none}
+.dd-button{display:block;position:relative;width:100%;min-width:0;margin:0;text-align:left;padding:.8rem 2.75rem .8rem .8rem;border:1px solid #bfcbdb;border-radius:8px;background:#fff;color:#18283d;font-weight:400;line-height:1.25}
+.dd-button:hover{background:#f7f9fc}.dd-button:disabled{background:#f3f6fa}
+.dd.open .dd-button{border-color:#3566b7}
+.dd-value{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.dd-arrow{position:absolute;right:14px;top:50%;width:8px;height:8px;margin-top:-6px;border-right:2px solid #47617f;border-bottom:2px solid #47617f;transform:rotate(45deg);pointer-events:none}
+.dd.open .dd-arrow{transform:rotate(225deg);margin-top:-2px}
+.dd-list{position:absolute;z-index:1000;box-sizing:border-box;margin:0;padding:.3rem;list-style:none;background:#fff;border:1px solid #bfcbdb;border-radius:8px;box-shadow:0 10px 28px rgba(15,27,45,.16);overflow-y:auto;overscroll-behavior:contain;font-size:.95rem;color:#18283d}
+.dd-option{padding:.55rem .7rem;border-radius:6px;cursor:pointer;line-height:1.35;overflow-wrap:anywhere}
+.dd-option.active{background:#edf3ff;box-shadow:inset 0 0 0 2px #83adf4}
+.dd-option[aria-selected="true"]{font-weight:700;color:#164faa}
+.dd-option[aria-disabled="true"]{opacity:.45;cursor:default}
+.filters .f-country{flex:0 0 11.5rem}.filters .f-source{flex:0 0 17rem}
+.inline .dd{width:12rem;flex:none}
+.inline .dd-button{padding:.5rem 2.5rem .5rem .6rem}
+.publisher-row .dd{flex:1;width:auto;min-width:12rem;max-width:100%}
+@media(max-width:650px){.filters .f-country,.filters .f-source{flex:none}.inline .dd{width:auto;flex:1;min-width:0}.publisher-row .dd{min-width:0}}

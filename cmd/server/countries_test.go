@@ -41,7 +41,7 @@ func TestCountryFilter(t *testing.T) {
 	a, ctx := migratedApp(t)
 	bbc := addSource(t, a, "BBC World", "https://feeds.bbci.co.uk/news/t-world.xml", "the-gioi")
 	vne := addVnSource(t, a, "VnE Thế giới", "https://vnexpress.net/rss/t-the-gioi.rss", "the-gioi")
-	vneBiz := addVnSource(t, a, "VnE Kinh doanh", "https://vnexpress.net/rss/t-kd.rss", "kinh-doanh")
+	vneBiz := addVnSource(t, a, "VnE Kinh doanh", "https://vnexpress.net/rss/t-kd.rss", "kinh-te")
 	tt := addTTSource(t, a, "TT Thế giới", "https://tuoitre.vn/t-the-gioi.rss", "the-gioi")
 	now := time.Now()
 	var b, v []news.Item
@@ -59,7 +59,7 @@ func TestCountryFilter(t *testing.T) {
 
 	var seenBefore catResp
 	get(t, a, "/api/categories", &seenBefore)
-	seen := fmt.Sprintf("the-gioi:%d,kinh-doanh:%d", seenBefore.Cursor-10, seenBefore.Cursor-10)
+	seen := fmt.Sprintf("the-gioi:%d,kinh-te:%d", seenBefore.Cursor-10, seenBefore.Cursor-10)
 	countsBefore := newCounts(t, a, seen)
 
 	cases := []struct {
@@ -71,8 +71,8 @@ func TestCountryFilter(t *testing.T) {
 		{"country=VN", 6, 6, "VN"},
 		{"country=TH", 0, 0, ""},
 		{"country=unknown", 0, 0, ""},
-		{"country=VN&category=kinh-doanh", 2, 2, "VN"},
-		{"country=GB&category=kinh-doanh", 0, 0, ""},
+		{"country=VN&category=kinh-te", 2, 2, "VN"},
+		{"country=GB&category=kinh-te", 0, 0, ""},
 		{"country=VN&q=election", 4, 4, "VN"},
 		{"country=GB&q=election", 30, 33, "GB"},
 		{fmt.Sprintf("country=VN&source=%d", tt.ID), 1, 1, "VN"},

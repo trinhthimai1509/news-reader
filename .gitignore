@@ -22,3 +22,5 @@ tmp/
 prof-*/
 node_modules/
 .DS_Store
+# macOS metadata files (created on exFAT/FAT drives).
+._*
